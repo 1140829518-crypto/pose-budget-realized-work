@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 The Paper2 authors
+Copyright (c) 2026 Jianing Dong and Chunyan Wang
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of the original analysis-code files explicitly identified as MIT-licensed in

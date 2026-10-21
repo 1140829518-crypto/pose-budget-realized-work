@@ -1,0 +1,211 @@
+analysis,sequence,budget_or_transition,metric,n_runs,estimate,sd,ci95_low,ci95_high,unit,inference
+scene_budget,sitting_static,1,realization_ratio,1,1.0,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,sitting_static,1,cap_hit_rate,1,1.0,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,sitting_static,1,realized_total,1,632.0,nan,nan,nan,iterations,single-run descriptive only
+scene_budget,sitting_static,1,core_mean_ms,1,0.9501733924050633,nan,nan,nan,ms,single-run descriptive only
+scene_budget,sitting_static,3,realization_ratio,1,0.9936708860759493,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,sitting_static,3,cap_hit_rate,1,0.9810126582278481,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,sitting_static,3,realized_total,1,1884.0,nan,nan,nan,iterations,single-run descriptive only
+scene_budget,sitting_static,3,core_mean_ms,1,1.324951329113924,nan,nan,nan,ms,single-run descriptive only
+scene_budget,sitting_static,4,realization_ratio,1,0.9588607594936709,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,sitting_static,4,cap_hit_rate,1,0.8623417721518988,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,sitting_static,4,realized_total,1,2424.0,nan,nan,nan,iterations,single-run descriptive only
+scene_budget,sitting_static,4,core_mean_ms,1,1.5594276772151898,nan,nan,nan,ms,single-run descriptive only
+scene_budget,sitting_static,5,realization_ratio,1,0.7765822784810127,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,sitting_static,5,cap_hit_rate,1,0.03164556962025317,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,sitting_static,5,realized_total,1,2454.0,nan,nan,nan,iterations,single-run descriptive only
+scene_budget,sitting_static,5,core_mean_ms,1,1.6094832341772152,nan,nan,nan,ms,single-run descriptive only
+scene_budget,sitting_static,10,realization_ratio,1,0.39272151898734176,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,sitting_static,10,cap_hit_rate,1,0.0,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,sitting_static,10,realized_total,1,2482.0,nan,nan,nan,iterations,single-run descriptive only
+scene_budget,sitting_static,10,core_mean_ms,1,1.524838,nan,nan,nan,ms,single-run descriptive only
+scene_budget,walking_xyz,1,realization_ratio,1,1.0,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,walking_xyz,1,cap_hit_rate,1,1.0,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,walking_xyz,1,realized_total,1,632.0,nan,nan,nan,iterations,single-run descriptive only
+scene_budget,walking_xyz,1,core_mean_ms,1,0.6308974936708861,nan,nan,nan,ms,single-run descriptive only
+scene_budget,walking_xyz,3,realization_ratio,1,0.9963080168776371,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,walking_xyz,3,cap_hit_rate,1,0.9889240506329114,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,walking_xyz,3,realized_total,1,1889.0,nan,nan,nan,iterations,single-run descriptive only
+scene_budget,walking_xyz,3,core_mean_ms,1,1.0886827911392405,nan,nan,nan,ms,single-run descriptive only
+scene_budget,walking_xyz,4,realization_ratio,1,0.9727056962025317,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,walking_xyz,4,cap_hit_rate,1,0.9066455696202531,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,walking_xyz,4,realized_total,1,2459.0,nan,nan,nan,iterations,single-run descriptive only
+scene_budget,walking_xyz,4,core_mean_ms,1,1.414034006329114,nan,nan,nan,ms,single-run descriptive only
+scene_budget,walking_xyz,5,realization_ratio,1,0.8291139240506329,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,walking_xyz,5,cap_hit_rate,1,0.2468354430379747,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,walking_xyz,5,realized_total,1,2620.0,nan,nan,nan,iterations,single-run descriptive only
+scene_budget,walking_xyz,5,core_mean_ms,1,1.4040559493670886,nan,nan,nan,ms,single-run descriptive only
+scene_budget,walking_xyz,10,realization_ratio,1,0.4142405063291139,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,walking_xyz,10,cap_hit_rate,1,0.0,nan,nan,nan,ratio,single-run descriptive only
+scene_budget,walking_xyz,10,realized_total,1,2618.0,nan,nan,nan,iterations,single-run descriptive only
+scene_budget,walking_xyz,10,core_mean_ms,1,1.3858671898734176,nan,nan,nan,ms,single-run descriptive only
+scene_budget,sitting_rpy,1,realization_ratio,5,1.0,0.0,1.0,1.0,ratio,run-level t CI
+scene_budget,sitting_rpy,1,cap_hit_rate,5,1.0,0.0,1.0,1.0,ratio,run-level t CI
+scene_budget,sitting_rpy,1,realized_total,5,632.0,0.0,632.0,632.0,iterations,run-level t CI
+scene_budget,sitting_rpy,1,core_mean_ms,5,0.648421475949367,0.07254216496269483,0.5583484813634302,0.7384944705353039,ms,run-level t CI
+scene_budget,sitting_rpy,3,realization_ratio,5,0.9966244725738397,0.0012142262060359683,0.9951168116081293,0.9981321335395501,ratio,run-level t CI
+scene_budget,sitting_rpy,3,cap_hit_rate,5,0.989873417721519,0.00364267861810798,0.9853504348243877,0.9943964006186504,ratio,run-level t CI
+scene_budget,sitting_rpy,3,realized_total,5,1889.6,2.3021728866442674,1886.741474809013,1892.4585251909868,iterations,run-level t CI
+scene_budget,sitting_rpy,3,core_mean_ms,5,1.0185592050632912,0.021679065753776178,0.9916410896021352,1.0454773205244474,ms,run-level t CI
+scene_budget,sitting_rpy,4,realization_ratio,5,0.9693829113924051,0.004238321277208472,0.9641203404496743,0.9746454823351358,ratio,run-level t CI
+scene_budget,sitting_rpy,4,cap_hit_rate,5,0.8882911392405063,0.015687714630310705,0.868812268769955,0.9077700097110576,ratio,run-level t CI
+scene_budget,sitting_rpy,4,realized_total,5,2450.6,10.714476188783099,2437.2962206567763,2463.9037793432235,iterations,run-level t CI
+scene_budget,sitting_rpy,4,core_mean_ms,5,1.275735970886076,0.04569184766590814,1.2190020486279072,1.332469893144245,ms,run-level t CI
+scene_budget,sitting_rpy,5,realization_ratio,5,0.7965822784810127,0.0035338339937072668,0.7921944440353977,0.8009701129266277,ratio,run-level t CI
+scene_budget,sitting_rpy,5,cap_hit_rate,5,0.10253164556962026,0.004799288255728834,0.09657254212547961,0.1084907490137609,ratio,run-level t CI
+scene_budget,sitting_rpy,5,realized_total,5,2517.2,11.166915420114902,2503.3344431518567,2531.065556848143,iterations,run-level t CI
+scene_budget,sitting_rpy,5,core_mean_ms,5,1.308768298734177,0.059509910511508515,1.234876985315709,1.382659612152645,ms,run-level t CI
+scene_budget,sitting_rpy,10,realization_ratio,5,0.39617088607594936,0.002042916996402467,0.3936342695901978,0.3987075025617009,ratio,run-level t CI
+scene_budget,sitting_rpy,10,cap_hit_rate,5,0.0,0.0,0.0,0.0,ratio,run-level t CI
+scene_budget,sitting_rpy,10,realized_total,5,2503.8,12.911235417263523,2487.7685838100506,2519.83141618995,iterations,run-level t CI
+scene_budget,sitting_rpy,10,core_mean_ms,5,1.3265817392405064,0.05699678129330286,1.2558108878951184,1.3973525905858943,ms,run-level t CI
+scene_budget,walking_halfsphere,1,realization_ratio,5,1.0,0.0,1.0,1.0,ratio,run-level t CI
+scene_budget,walking_halfsphere,1,cap_hit_rate,5,1.0,0.0,1.0,1.0,ratio,run-level t CI
+scene_budget,walking_halfsphere,1,realized_total,5,632.0,0.0,632.0,632.0,iterations,run-level t CI
+scene_budget,walking_halfsphere,1,core_mean_ms,5,0.6277731848101266,0.033415668434174546,0.586282152339498,0.6692642172807551,ms,run-level t CI
+scene_budget,walking_halfsphere,3,realization_ratio,5,0.9987341772151899,0.0004717442990506014,0.9981484293027009,0.9993199251276789,ratio,run-level t CI
+scene_budget,walking_halfsphere,3,cap_hit_rate,5,0.9962025316455696,0.0014152328971517732,0.9944452879081026,0.9979597753830366,ratio,run-level t CI
+scene_budget,walking_halfsphere,3,realized_total,5,1893.6,0.8944271909999159,1892.4894219579207,1894.710578042079,iterations,run-level t CI
+scene_budget,walking_halfsphere,3,core_mean_ms,5,1.0659137632911393,0.037422063919142164,1.0194481337842602,1.1123793927980183,ms,run-level t CI
+scene_budget,walking_halfsphere,4,realization_ratio,5,0.980379746835443,0.004210540851498475,0.9751516698471712,0.9856078238237149,ratio,run-level t CI
+scene_budget,walking_halfsphere,4,cap_hit_rate,5,0.925632911392405,0.01648154007594913,0.9051683764451464,0.9460974463396636,ratio,run-level t CI
+scene_budget,walking_halfsphere,4,realized_total,5,2478.4,10.644247272588137,2465.183421373649,2491.6165786263514,iterations,run-level t CI
+scene_budget,walking_halfsphere,4,core_mean_ms,5,1.2958139898734178,0.0671767937317413,1.212402983581954,1.3792249961648815,ms,run-level t CI
+scene_budget,walking_halfsphere,5,realization_ratio,5,0.8309493670886076,0.0030714140654559477,0.8271357028199542,0.8347630313572609,ratio,run-level t CI
+scene_budget,walking_halfsphere,5,cap_hit_rate,5,0.2509493670886076,0.008781289193361783,0.24004595643939447,0.26185277773782073,ratio,run-level t CI
+scene_budget,walking_halfsphere,5,realized_total,5,2625.8,9.705668446840743,2613.7488209110556,2637.8511790889447,iterations,run-level t CI
+scene_budget,walking_halfsphere,5,core_mean_ms,5,1.403727494936709,0.04528335383761295,1.3475007847586224,1.4599542051147953,ms,run-level t CI
+scene_budget,walking_halfsphere,10,realization_ratio,5,0.4177215189873418,0.0013929443719667013,0.41599195010917017,0.4194510878655134,ratio,run-level t CI
+scene_budget,walking_halfsphere,10,cap_hit_rate,5,0.0,0.0,0.0,0.0,ratio,run-level t CI
+scene_budget,walking_halfsphere,10,realized_total,5,2640.0,8.803408430829505,2629.0691246899555,2650.9308753100445,iterations,run-level t CI
+scene_budget,walking_halfsphere,10,core_mean_ms,5,1.412164293670886,0.03911590426259961,1.3635954835908308,1.4607331037509412,ms,run-level t CI
+marginal_response,sitting_static,B1->B3,realized_relative_change,1+1,1.981012658227848,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,sitting_static,B1->B3,marginal_work_elasticity,1+1,0.990506329113924,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,sitting_static,B1->B3,extra_work_realization,1+1,0.990506329113924,nan,nan,nan,iterations_per_authorized_iteration,single-run descriptive only
+marginal_response,sitting_static,B3->B4,realized_relative_change,1+1,0.28662420382165604,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,sitting_static,B3->B4,marginal_work_elasticity,1+1,0.8598726114649682,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,sitting_static,B3->B4,extra_work_realization,1+1,0.8544303797468354,nan,nan,nan,iterations_per_authorized_iteration,single-run descriptive only
+marginal_response,sitting_static,B4->B5,realized_relative_change,1+1,0.012376237623762377,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,sitting_static,B4->B5,marginal_work_elasticity,1+1,0.04950495049504951,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,sitting_static,B4->B5,extra_work_realization,1+1,0.04746835443037975,nan,nan,nan,iterations_per_authorized_iteration,single-run descriptive only
+marginal_response,sitting_static,B5->B10,realized_relative_change,1+1,0.011409942950285249,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,sitting_static,B5->B10,marginal_work_elasticity,1+1,0.011409942950285249,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,sitting_static,B5->B10,extra_work_realization,1+1,0.008860759493670886,nan,nan,nan,iterations_per_authorized_iteration,single-run descriptive only
+marginal_response,walking_xyz,B1->B3,realized_relative_change,1+1,1.9889240506329113,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,walking_xyz,B1->B3,marginal_work_elasticity,1+1,0.9944620253164557,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,walking_xyz,B1->B3,extra_work_realization,1+1,0.9944620253164557,nan,nan,nan,iterations_per_authorized_iteration,single-run descriptive only
+marginal_response,walking_xyz,B3->B4,realized_relative_change,1+1,0.30174695606140817,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,walking_xyz,B3->B4,marginal_work_elasticity,1+1,0.9052408681842246,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,walking_xyz,B3->B4,extra_work_realization,1+1,0.9018987341772152,nan,nan,nan,iterations_per_authorized_iteration,single-run descriptive only
+marginal_response,walking_xyz,B4->B5,realized_relative_change,1+1,0.06547376982513217,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,walking_xyz,B4->B5,marginal_work_elasticity,1+1,0.2618950793005287,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,walking_xyz,B4->B5,extra_work_realization,1+1,0.254746835443038,nan,nan,nan,iterations_per_authorized_iteration,single-run descriptive only
+marginal_response,walking_xyz,B5->B10,realized_relative_change,1+1,-0.0007633587786259542,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,walking_xyz,B5->B10,marginal_work_elasticity,1+1,-0.0007633587786259542,nan,nan,nan,ratio,single-run descriptive only
+marginal_response,walking_xyz,B5->B10,extra_work_realization,1+1,-0.0006329113924050633,nan,nan,nan,iterations_per_authorized_iteration,single-run descriptive only
+marginal_response,sitting_rpy,B1->B3,realized_relative_change,5+5,1.989873417721519,nan,1.9873417721518987,1.9930379746835443,ratio,run-level stratified bootstrap
+marginal_response,sitting_rpy,B1->B3,marginal_work_elasticity,5+5,0.9949367088607595,nan,0.9936708860759493,0.9965189873417721,ratio,run-level stratified bootstrap
+marginal_response,sitting_rpy,B1->B3,extra_work_realization,5+5,0.9949367088607595,nan,0.9936708860759493,0.9965189873417721,iterations_per_authorized_iteration,run-level stratified bootstrap
+marginal_response,sitting_rpy,B3->B4,realized_relative_change,5+5,0.2968882303132938,nan,0.2924298570672314,0.3014931695435773,ratio,run-level stratified bootstrap
+marginal_response,sitting_rpy,B3->B4,marginal_work_elasticity,5+5,0.8906646909398814,nan,0.8772895712016943,0.9044795086307319,ratio,run-level stratified bootstrap
+marginal_response,sitting_rpy,B3->B4,extra_work_realization,5+5,0.8876582278481012,nan,0.8743670886075948,0.9009493670886077,iterations_per_authorized_iteration,run-level stratified bootstrap
+marginal_response,sitting_rpy,B4->B5,realized_relative_change,5+5,0.02717701787317388,nan,0.022337852034060413,0.03214460984786536,ratio,run-level stratified bootstrap
+marginal_response,sitting_rpy,B4->B5,marginal_work_elasticity,5+5,0.10870807149269553,nan,0.08935140813624165,0.12857843939146144,ratio,run-level stratified bootstrap
+marginal_response,sitting_rpy,B4->B5,extra_work_realization,5+5,0.10537974683544289,nan,0.08670886075949395,0.12436708860759552,iterations_per_authorized_iteration,run-level stratified bootstrap
+marginal_response,sitting_rpy,B5->B10,realized_relative_change,5+5,-0.005323375178769918,nan,-0.010481997826934372,8.185059414546809e-05,ratio,run-level stratified bootstrap
+marginal_response,sitting_rpy,B5->B10,marginal_work_elasticity,5+5,-0.005323375178769918,nan,-0.010481997826934372,8.185059414546809e-05,ratio,run-level stratified bootstrap
+marginal_response,sitting_rpy,B5->B10,extra_work_realization,5+5,-0.004240506329113809,nan,-0.008356012658227873,6.487341772157727e-05,iterations_per_authorized_iteration,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B1->B3,realized_relative_change,5+5,1.9962025316455694,nan,1.995253164556962,1.99746835443038,ratio,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B1->B3,marginal_work_elasticity,5+5,0.9981012658227847,nan,0.997626582278481,0.99873417721519,ratio,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B1->B3,extra_work_realization,5+5,0.9981012658227847,nan,0.997626582278481,0.99873417721519,iterations_per_authorized_iteration,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B3->B4,realized_relative_change,5+5,0.30882974228981847,nan,0.30446640501885613,0.3131601182931982,ratio,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B3->B4,marginal_work_elasticity,5+5,0.9264892268694555,nan,0.9133992150565683,0.9394803548795946,ratio,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B3->B4,extra_work_realization,5+5,0.9253164556962028,nan,0.9123417721518986,0.9382911392405063,iterations_per_authorized_iteration,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B4->B5,realized_relative_change,5+5,0.059473854099419014,nan,0.05501378366135132,0.06443528175276887,ratio,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B4->B5,marginal_work_elasticity,5+5,0.23789541639767606,nan,0.22005513464540527,0.2577411270110755,ratio,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B4->B5,extra_work_realization,5+5,0.23322784810126596,nan,0.21613924050632896,0.2522151898734171,iterations_per_authorized_iteration,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B5->B10,realized_relative_change,5+5,0.005407875695026208,nan,0.0014430014430013394,0.009240185645043236,ratio,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B5->B10,marginal_work_elasticity,5+5,0.005407875695026208,nan,0.0014430014430013394,0.009240185645043236,ratio,run-level stratified bootstrap
+marginal_response,walking_halfsphere,B5->B10,extra_work_realization,5+5,0.0044936708860758914,nan,0.001202531645569534,0.007658227848101352,iterations_per_authorized_iteration,run-level stratified bootstrap
+scene_run_level_association,sitting_static,all budgets,requested_budget_vs_core_runtime,5,0.660336256891217,nan,nan,nan,Pearson r,n=5 descriptive only
+scene_run_level_association,sitting_static,all budgets,realized_work_vs_core_runtime,5,0.9892343647700048,nan,nan,nan,Pearson r,n=5 descriptive only
+scene_run_level_association,sitting_static,all budgets,realization_ratio_vs_cap_hit_rate,5,0.8612752104934005,nan,nan,nan,Pearson r,n=5 descriptive only
+scene_run_level_association,walking_xyz,all budgets,requested_budget_vs_core_runtime,5,0.7004346751280779,nan,nan,nan,Pearson r,n=5 descriptive only
+scene_run_level_association,walking_xyz,all budgets,realized_work_vs_core_runtime,5,0.9931904485252551,nan,nan,nan,Pearson r,n=5 descriptive only
+scene_run_level_association,walking_xyz,all budgets,realization_ratio_vs_cap_hit_rate,5,0.9036505665788415,nan,nan,nan,Pearson r,n=5 descriptive only
+scene_run_level_association,sitting_rpy,all budgets,requested_budget_vs_core_runtime,25,0.7469820260111456,nan,0.6991062192135398,0.7948943769254846,Pearson r,stratified run bootstrap
+scene_run_level_association,sitting_rpy,all budgets,realized_work_vs_core_runtime,25,0.976583580421353,nan,0.963186895311921,0.9902773836545812,Pearson r,stratified run bootstrap
+scene_run_level_association,sitting_rpy,all budgets,realization_ratio_vs_cap_hit_rate,25,0.8725387292048631,nan,0.8690107318356515,0.875607514325524,Pearson r,stratified run bootstrap
+scene_run_level_association,walking_halfsphere,all budgets,requested_budget_vs_core_runtime,25,0.7705417619396677,nan,0.7362630350895459,0.804569518066224,Pearson r,stratified run bootstrap
+scene_run_level_association,walking_halfsphere,all budgets,realized_work_vs_core_runtime,25,0.9865954570624829,nan,0.9810480887391442,0.9928124293824885,Pearson r,stratified run bootstrap
+scene_run_level_association,walking_halfsphere,all budgets,realization_ratio_vs_cap_hit_rate,25,0.9054667677619943,nan,0.9044105705915988,0.9064736457898,Pearson r,stratified run bootstrap
+within_run_association,sitting_static,1,corr_realized_runtime_within_run,0,nan,nan,nan,nan,Pearson r,undefined: realized work constant
+within_run_association,sitting_static,1,corr_edgework_runtime_within_run,1,0.1194996322212162,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,sitting_static,3,corr_realized_runtime_within_run,1,-0.09797597747235674,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,sitting_static,3,corr_edgework_runtime_within_run,1,0.3389399236569518,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,sitting_static,4,corr_realized_runtime_within_run,1,0.08222219332220634,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,sitting_static,4,corr_edgework_runtime_within_run,1,0.309837266023124,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,sitting_static,5,corr_realized_runtime_within_run,1,0.047566972340426276,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,sitting_static,5,corr_edgework_runtime_within_run,1,0.31902405922246563,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,sitting_static,10,corr_realized_runtime_within_run,1,0.004536991683104625,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,sitting_static,10,corr_edgework_runtime_within_run,1,0.4183644107534047,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,walking_xyz,1,corr_realized_runtime_within_run,0,nan,nan,nan,nan,Pearson r,undefined: realized work constant
+within_run_association,walking_xyz,1,corr_edgework_runtime_within_run,1,0.5215195252111988,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,walking_xyz,3,corr_realized_runtime_within_run,1,0.04982250053190866,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,walking_xyz,3,corr_edgework_runtime_within_run,1,0.5518583966823503,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,walking_xyz,4,corr_realized_runtime_within_run,1,0.13797928895331082,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,walking_xyz,4,corr_edgework_runtime_within_run,1,0.700457458075519,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,walking_xyz,5,corr_realized_runtime_within_run,1,-0.019929393583915673,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,walking_xyz,5,corr_edgework_runtime_within_run,1,0.7713489871674075,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,walking_xyz,10,corr_realized_runtime_within_run,1,-0.07788876793695756,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,walking_xyz,10,corr_edgework_runtime_within_run,1,0.8124565294499193,nan,nan,nan,Pearson r,single-run descriptive only
+within_run_association,sitting_rpy,1,corr_realized_runtime_within_run,0,nan,nan,nan,nan,Pearson r,undefined: realized work constant
+within_run_association,sitting_rpy,1,corr_edgework_runtime_within_run,5,0.5174229948885256,0.25233001111507014,0.2538325271259714,0.7094736342297834,Pearson r,Fisher-z run summary
+within_run_association,sitting_rpy,3,corr_realized_runtime_within_run,5,-0.008617669727533089,0.11133443930096004,-0.145811105107497,0.128900962983005,Pearson r,Fisher-z run summary
+within_run_association,sitting_rpy,3,corr_edgework_runtime_within_run,5,0.7333554602388453,0.20401042965897587,0.5932307595905448,0.83034964912321,Pearson r,Fisher-z run summary
+within_run_association,sitting_rpy,4,corr_realized_runtime_within_run,5,0.06630099992668054,0.08655310733968252,-0.04104839276035192,0.17213718975800105,Pearson r,Fisher-z run summary
+within_run_association,sitting_rpy,4,corr_edgework_runtime_within_run,5,0.7804973895210912,0.09800405373999371,0.7282325313026554,0.8237360915417871,Pearson r,Fisher-z run summary
+within_run_association,sitting_rpy,5,corr_realized_runtime_within_run,5,-0.008305961588056993,0.06582408347544422,-0.08979502939239348,0.07329357432407155,Pearson r,Fisher-z run summary
+within_run_association,sitting_rpy,5,corr_edgework_runtime_within_run,5,0.7651810503662471,0.13092606733717438,0.6889901191084287,0.8246446615782868,Pearson r,Fisher-z run summary
+within_run_association,sitting_rpy,10,corr_realized_runtime_within_run,5,0.0002117427876185648,0.038516114874905395,-0.04757638499043271,0.047998903469006295,Pearson r,Fisher-z run summary
+within_run_association,sitting_rpy,10,corr_edgework_runtime_within_run,5,0.7942228868294793,0.1388876100684425,0.7212834520752572,0.8497405442987581,Pearson r,Fisher-z run summary
+within_run_association,walking_halfsphere,1,corr_realized_runtime_within_run,0,nan,nan,nan,nan,Pearson r,undefined: realized work constant
+within_run_association,walking_halfsphere,1,corr_edgework_runtime_within_run,5,0.6543726464065743,0.3375929335488551,0.3484961515680616,0.8342894619415882,Pearson r,Fisher-z run summary
+within_run_association,walking_halfsphere,3,corr_realized_runtime_within_run,5,-0.1467693616390698,0.050950569319702654,-0.2080196655811853,-0.08437250549114407,Pearson r,Fisher-z run summary
+within_run_association,walking_halfsphere,3,corr_edgework_runtime_within_run,5,0.8604110948371579,0.09971863575503062,0.8246271987907787,0.8893363125439168,Pearson r,Fisher-z run summary
+within_run_association,walking_halfsphere,4,corr_realized_runtime_within_run,5,-0.05714308289951014,0.05551719726090828,-0.1254743348765124,0.01172776530974286,Pearson r,Fisher-z run summary
+within_run_association,walking_halfsphere,4,corr_edgework_runtime_within_run,5,0.855521032165109,0.21994435764324255,0.762975106081502,0.9137013731478725,Pearson r,Fisher-z run summary
+within_run_association,walking_halfsphere,5,corr_realized_runtime_within_run,5,-0.0103661358953654,0.08503878122449801,-0.11543917217525973,0.09493631618759231,Pearson r,Fisher-z run summary
+within_run_association,walking_halfsphere,5,corr_edgework_runtime_within_run,5,0.8214896273612434,0.19213609970715909,0.7272255142411679,0.8853408582424857,Pearson r,Fisher-z run summary
+within_run_association,walking_halfsphere,10,corr_realized_runtime_within_run,5,0.004544087288102474,0.062240220880053994,-0.07260931627584004,0.08164342894174004,Pearson r,Fisher-z run summary
+within_run_association,walking_halfsphere,10,corr_edgework_runtime_within_run,5,0.8624073120391823,0.1966459365404001,0.785087364908671,0.913261246738235,Pearson r,Fisher-z run summary
+graph_size_stratum,sitting_static,"Q2 [116,164]",core_runtime_mean,5,1.2485112564102565,0.3855039514630694,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,sitting_static,"Q2 [116,164]",realized_iterations_mean,5,12.41025641025641,5.077254631083556,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,sitting_static,"Q3 [164,221]",core_runtime_mean,5,1.3980708342342343,0.4136919279416561,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,sitting_static,"Q3 [164,221]",realized_iterations_mean,5,12.612612612612613,4.489802266177356,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,sitting_static,"Q4 [221,425]",core_runtime_mean,5,1.5176008813559323,0.44691052159006095,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,sitting_static,"Q4 [221,425]",realized_iterations_mean,5,12.067796610169491,4.623849015588935,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,walking_xyz,"Q1 [35,116]",core_runtime_mean,5,0.9150477981651376,0.38549020227083686,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,walking_xyz,"Q1 [35,116]",realized_iterations_mean,5,13.807339449541285,5.274812730079695,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,walking_xyz,"Q2 [116,164]",core_runtime_mean,5,1.0409065785714287,0.34385791145887745,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,walking_xyz,"Q2 [116,164]",realized_iterations_mean,5,12.878571428571428,5.046689332689909,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,walking_xyz,"Q3 [164,221]",core_runtime_mean,5,1.2192975498007967,0.40310014934981175,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,walking_xyz,"Q3 [164,221]",realized_iterations_mean,5,12.685258964143426,4.769123801356946,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,walking_xyz,"Q4 [221,425]",core_runtime_mean,5,1.5912078466666666,0.5473933590374033,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,walking_xyz,"Q4 [221,425]",realized_iterations_mean,5,12.82,4.774189554892041,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,sitting_rpy,"Q1 [35,116]",core_runtime_mean,25,0.821018631802721,0.2873774138346068,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,sitting_rpy,"Q1 [35,116]",realized_iterations_mean,25,12.875850340136054,4.88609613561983,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,sitting_rpy,"Q2 [116,164]",core_runtime_mean,25,0.974779544723618,0.32918801465822,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,sitting_rpy,"Q2 [116,164]",realized_iterations_mean,25,12.530653266331658,4.532446747229993,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,sitting_rpy,"Q3 [164,221]",core_runtime_mean,25,1.3010656647000984,0.43457548537424484,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,sitting_rpy,"Q3 [164,221]",realized_iterations_mean,25,12.731563421828909,4.695419615781642,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,sitting_rpy,"Q4 [221,425]",core_runtime_mean,25,1.5066474356955382,1.0167460470263674,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,sitting_rpy,"Q4 [221,425]",realized_iterations_mean,25,12.346456692913385,4.587667785166842,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,walking_halfsphere,"Q1 [35,116]",core_runtime_mean,25,0.793124595845137,0.2828563031037205,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,walking_halfsphere,"Q1 [35,116]",realized_iterations_mean,25,13.24268177525968,5.145577393677728,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,walking_halfsphere,"Q2 [116,164]",core_runtime_mean,25,0.9329657339449541,0.29218616311434953,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,walking_halfsphere,"Q2 [116,164]",realized_iterations_mean,25,12.846075433231396,4.78366239492188,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,walking_halfsphere,"Q3 [164,221]",core_runtime_mean,25,1.1569964874551972,0.4049596106014969,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,walking_halfsphere,"Q3 [164,221]",realized_iterations_mean,25,13.084229390681003,5.012917106333344,nan,nan,iterations,descriptive correlated invocations
+graph_size_stratum,walking_halfsphere,"Q4 [221,425]",core_runtime_mean,25,1.6164925162721893,0.6132514340362211,nan,nan,ms,descriptive correlated invocations
+graph_size_stratum,walking_halfsphere,"Q4 [221,425]",realized_iterations_mean,25,12.886094674556213,4.928689000401702,nan,nan,iterations,descriptive correlated invocations

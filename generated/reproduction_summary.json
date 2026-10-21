@@ -1,0 +1,30 @@
+{
+  "formal_runs": 60,
+  "invocations": 9480,
+  "scenes": [
+    "sitting_static",
+    "walking_xyz",
+    "sitting_rpy",
+    "walking_halfsphere"
+  ],
+  "budgets": [
+    1,
+    3,
+    4,
+    5,
+    10
+  ],
+  "tracking_gaps_total": 0,
+  "generated_files": [
+    "accuracy_vs_budget.png",
+    "b5_b10_response.csv",
+    "budget_vs_poseopt_runtime.png",
+    "diagnostic_stop_and_decay.png",
+    "realized_work_vs_runtime.png",
+    "reproduction_summary.json",
+    "runtime_correlations.csv",
+    "scene_budget_recomputed.csv",
+    "work_response.png"
+  ],
+  "scope": "offline reconstruction only; no SLAM execution"
+}

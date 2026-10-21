@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "Please cite the associated manuscript; update this record after publication."
+title: "RGBD SLAM Realized Work Analysis"
+type: software
+authors:
+  - family-names: Dong
+    given-names: Jianing
+  - family-names: Wang
+    given-names: Chunyan
+version: 0.1.0-release-candidate
+date-released: 2026-10-21
+preferred-citation:
+  type: article
+  title: "Realized-Work-Aware Empirical Analysis of Pose Optimization in RGB-D SLAM"
+  authors:
+    - family-names: Dong
+      given-names: Jianing
+    - family-names: Wang
+      given-names: Chunyan
+  notes: "Manuscript under preparation; journal, year, volume, pages, and DOI are not yet available."

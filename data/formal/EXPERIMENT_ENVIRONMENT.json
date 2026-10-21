@@ -1,0 +1,23 @@
+{
+  "cpu_affinity": "2-7",
+  "actual_affinity": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "cpu_model": "Intel(R) Core(TM) i7-10870H CPU @ 2.20GHz",
+  "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.29",
+  "budgets": [
+    1,
+    3,
+    4,
+    5,
+    10
+  ],
+  "binary_sha256": "130840401a0dca5e8fdd4f001ebbf8e9a41a6b386a13579d4016a6c636d4f82a",
+  "orb_library_sha256": "51cd267bd6474e5f07ecb57f0fb00393be018ee3966e21d203b1df1b432b134a",
+  "g2o_library_sha256": "69f79af9c039877c769ea4c69849bbbf855407d0c0a0a90c3ca5c9f5dd9becb0"
+}
