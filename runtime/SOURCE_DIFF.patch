@@ -1,0 +1,1781 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 92df010..a697c5e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,16 @@
+ cmake_minimum_required(VERSION 2.8)
+ project(ORB_SLAM2)
+ 
++# Paper 2 BSRW validation: expose the g2o realized-work counters without
++# enabling the unrelated RWBC controller or V5 semantic-motion extensions.
++option(ORB_SLAM2_ENABLE_REALIZED_WORK_COUNTERS
++  "Compile realized-LM-work counters into the optimizer hot path" ON)
++if(ORB_SLAM2_ENABLE_REALIZED_WORK_COUNTERS)
++  add_definitions(-DORB_SLAM2_REALIZED_WORK_COUNTERS=1)
++else()
++  add_definitions(-DORB_SLAM2_REALIZED_WORK_COUNTERS=0)
++endif()
++
+ IF(NOT CMAKE_BUILD_TYPE)
+   SET(CMAKE_BUILD_TYPE Release)
+ ENDIF()
+@@ -39,16 +49,29 @@ endif()
+ find_package(Eigen3 3.1.0 REQUIRED NO_MODULE)
+ message(STATUS "Eigen3_INCLUDE_DIRS: ${EIGEN3_INCLUDE_DIRS}")
+ find_package(Pangolin REQUIRED)
++find_package(PkgConfig REQUIRED)
++pkg_check_modules(JSONCPP REQUIRED jsoncpp)
++find_package(OpenSSL REQUIRED)
+ 
+ include_directories(
+ ${PROJECT_SOURCE_DIR}
+ ${PROJECT_SOURCE_DIR}/include
+ ${EIGEN3_INCLUDE_DIR}
+ ${Pangolin_INCLUDE_DIRS}
++${JSONCPP_INCLUDE_DIRS}
+ )
+ 
+ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
+ 
++# Cacheable library identities keep validation builds inside the isolated
++# worktree while allowing their hashes to be frozen explicitly.
++set(ORB_SLAM2_G2O_LIBRARY
++  "${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.so"
++  CACHE FILEPATH "Instrumented g2o shared library")
++set(ORB_SLAM2_DBOW2_LIBRARY
++  "${PROJECT_SOURCE_DIR}/Thirdparty/DBoW2/lib/libDBoW2.so"
++  CACHE FILEPATH "DBoW2 shared library")
++
+ add_library(${PROJECT_NAME} SHARED
+ src/System.cc
+ src/Tracking.cc
+@@ -73,6 +96,7 @@ src/Object.cpp
+ src/SemanticObject.cc
+ src/ExperimentTiming.cc
+ src/FrameTemporalBaseline.cc
++src/BSRWSnapshot.cc
+ src/V5MotionShadow.cc
+ src/V5MotionState.cc
+ )
+@@ -81,8 +105,10 @@ target_link_libraries(${PROJECT_NAME}
+ ${OpenCV_LIBS}
+ ${EIGEN3_LIBS}
+ ${Pangolin_LIBRARIES}
+-${PROJECT_SOURCE_DIR}/Thirdparty/DBoW2/lib/libDBoW2.so
+-${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.so
++${ORB_SLAM2_DBOW2_LIBRARY}
++${ORB_SLAM2_G2O_LIBRARY}
++${JSONCPP_LIBRARIES}
++OpenSSL::Crypto
+ )
+ 
+ option(BUILD_BELIEF_TESTS "Build persistent MapPoint belief regression tests" OFF)
+@@ -128,6 +154,37 @@ add_executable(rgbd_tum
+ Examples/RGB-D/rgbd_tum.cc)
+ target_link_libraries(rgbd_tum ${PROJECT_NAME})
+ 
++option(BUILD_REALIZED_WORK_TESTS
++  "Build the isolated BSRW/g2o instrumentation regression tests" OFF)
++if(BUILD_REALIZED_WORK_TESTS)
++  enable_testing()
++  find_package(PythonInterp 3 REQUIRED)
++
++  add_executable(test_realized_work_g2o
++    paper2_development/modules/ObjectDynamic/tests/test_realized_work_g2o.cc)
++  target_compile_options(test_realized_work_g2o PRIVATE -UNDEBUG)
++  target_link_libraries(test_realized_work_g2o
++    ${ORB_SLAM2_G2O_LIBRARY})
++  add_test(NAME realized_work_g2o_counters COMMAND test_realized_work_g2o)
++
++  if(ORB_SLAM2_ENABLE_REALIZED_WORK_COUNTERS)
++    add_executable(test_realized_work_pose
++      paper2_development/modules/ObjectDynamic/tests/test_realized_work_pose.cc)
++    target_compile_options(test_realized_work_pose PRIVATE -UNDEBUG)
++    target_link_libraries(test_realized_work_pose ${PROJECT_NAME})
++    add_test(NAME realized_work_pose_noninterference COMMAND test_realized_work_pose)
++    set(REALIZED_WORK_EXPECTED_COUNTERS 1)
++  else()
++    set(REALIZED_WORK_EXPECTED_COUNTERS 0)
++  endif()
++
++  add_test(NAME realized_work_build_capability_banner
++    COMMAND ${PYTHON_EXECUTABLE}
++      ${PROJECT_SOURCE_DIR}/paper2_development/modules/ObjectDynamic/tests/test_realized_work_build_banner.py
++      --binary $<TARGET_FILE:rgbd_tum>
++      --active 0 --shadow 1 --counters ${REALIZED_WORK_EXPECTED_COUNTERS})
++endif()
++
+ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/Examples/Stereo)
+ 
+ add_executable(stereo_kitti
+diff --git a/Examples/RGB-D/rgbd_tum.cc b/Examples/RGB-D/rgbd_tum.cc
+index 0da90e0..589464d 100644
+--- a/Examples/RGB-D/rgbd_tum.cc
++++ b/Examples/RGB-D/rgbd_tum.cc
+@@ -42,6 +42,7 @@
+ #include <memory>//zt1
+ 
+ #include<System.h>
++#include<Optimizer.h>
+ 
+ #include "Frame.h"//zt2 
+ #include "Object.h"//zt3
+@@ -86,6 +87,14 @@ void MakeDetect_result(vector<std::pair<vector<double>, int>>& detect_result, in
+ //zt5************
+ int main(int argc, char **argv)
+ {
++    // Printed before argument validation so a validation run can prove which
++    // instrumentation binary was selected without starting SLAM.
++    cout << "[BuildCapability] ACTIVE_MODE="
++         << ENABLE_OBJECT_DYNAMIC_ACTIVE_MODE
++         << " SHADOW_MODE=" << ENABLE_OBJECT_DYNAMIC_SHADOW_MODE
++         << " REALIZED_WORK_COUNTERS=" << ORB_SLAM2_REALIZED_WORK_COUNTERS
++         << endl;
++
+     if(argc != 5)
+     {
+         cerr << endl << "Usage: ./rgbd_tum path_to_vocabulary path_to_settings path_to_sequence path_to_association" << endl;
+@@ -317,6 +326,9 @@ LoadImages(strAssociationFilename, vstrImageFilenamesRGB, vstrImageFilenamesD, v
+     //终止SLAM过程
+     // Stop all threads
+     SLAM.Shutdown();
++    // Drain buffered or count-only realized-work records after all Tracking
++    // calls have completed. No RWBC model or controller is involved.
++    ORB_SLAM2::Optimizer::FlushRealizedWorkLog();
+ 
+     // Tracking time statistics
+     //统计分析追踪耗时
+diff --git a/Thirdparty/g2o/CMakeLists.txt b/Thirdparty/g2o/CMakeLists.txt
+index c1a3c91..58a9c41 100644
+--- a/Thirdparty/g2o/CMakeLists.txt
++++ b/Thirdparty/g2o/CMakeLists.txt
+@@ -3,6 +3,14 @@ SET(CMAKE_LEGACY_CYGWIN_WIN32 0)
+ 
+ PROJECT(g2o)
+ 
++OPTION(ORB_SLAM2_ENABLE_REALIZED_WORK_COUNTERS
++  "Compile realized-LM-work counters into the optimizer hot path" ON)
++IF(ORB_SLAM2_ENABLE_REALIZED_WORK_COUNTERS)
++  ADD_DEFINITIONS(-DORB_SLAM2_REALIZED_WORK_COUNTERS=1)
++ELSE()
++  ADD_DEFINITIONS(-DORB_SLAM2_REALIZED_WORK_COUNTERS=0)
++ENDIF()
++
+ SET(g2o_C_FLAGS)
+ SET(g2o_CXX_FLAGS)
+ 
+diff --git a/Thirdparty/g2o/g2o/core/optimization_algorithm_levenberg.cpp b/Thirdparty/g2o/g2o/core/optimization_algorithm_levenberg.cpp
+index b24718f..24f2b60 100644
+--- a/Thirdparty/g2o/g2o/core/optimization_algorithm_levenberg.cpp
++++ b/Thirdparty/g2o/g2o/core/optimization_algorithm_levenberg.cpp
+@@ -52,6 +52,8 @@ namespace g2o {
+     _ni=2.;
+     _levenbergIterations = 0;
+     _nBad = 0;
++    _lastTerminationReason = TerminationNone;
++    _workInstrumentationEnabled = false;
+   }
+ 
+   OptimizationAlgorithmLevenberg::~OptimizationAlgorithmLevenberg()
+@@ -60,6 +62,11 @@ namespace g2o {
+ 
+   OptimizationAlgorithm::SolverResult OptimizationAlgorithmLevenberg::solve(int iteration, bool online)
+   {
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++    if (_workInstrumentationEnabled && iteration == 0)
++      resetWorkStatistics();
++#endif
++    _lastTerminationReason = TerminationNone;
+     assert(_optimizer && "_optimizer not set");
+     assert(_solver->optimizer() == _optimizer && "underlying linear solver operates on different graph");
+ 
+@@ -72,6 +79,12 @@ namespace g2o {
+     }
+ 
+     double t=get_monotonic_time();
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++    if (_workInstrumentationEnabled) {
++      ++_workStatistics.residualSweeps;
++      _workStatistics.residualEdgeEvaluations += _optimizer->activeEdges().size();
++    }
++#endif
+     _optimizer->computeActiveErrors();
+     G2OBatchStatistics* globalStats = G2OBatchStatistics::globalStats();
+     if (globalStats) {
+@@ -84,7 +97,30 @@ namespace g2o {
+ 
+     double iniChi = currentChi;
+ 
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++    if (_workInstrumentationEnabled && iteration == 0)
++      _workStatistics.initialRobustChi2 = currentChi;
++    const auto recordTerminalWork = [this](const double finalChi) {
++      if (!_workInstrumentationEnabled)
++        return;
++      _workStatistics.finalRobustChi2 = finalChi;
++      _workStatistics.terminalDamping = _currentLambda;
++      _workStatistics.objectiveReduction =
++          _workStatistics.initialRobustChi2 - finalChi;
++    };
++#endif
++
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++    if (_workInstrumentationEnabled) {
++      ++_workStatistics.jacobianBuilds;
++      _workStatistics.jacobianEdgeEvaluations += _optimizer->activeEdges().size();
++    }
++#endif
+     _solver->buildSystem();
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++    if (_workInstrumentationEnabled)
++      _workStatistics.hessianDimension = _solver->vectorSize();
++#endif
+     if (globalStats) {
+       globalStats->timeQuadraticForm = get_monotonic_time()-t;
+     }
+@@ -101,6 +137,12 @@ namespace g2o {
+     qmax = 0;
+     do {
+       _optimizer->push();
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++      if (_workInstrumentationEnabled) {
++        ++_workStatistics.lmTrials;
++        ++_workStatistics.linearSolveAttempts;
++      }
++#endif
+       if (globalStats) {
+         globalStats->levenbergIterations++;
+         t=get_monotonic_time();
+@@ -108,6 +150,14 @@ namespace g2o {
+       // update the diagonal of the system matrix
+       _solver->setLambda(_currentLambda, true);
+       bool ok2 = _solver->solve();
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++      if (_workInstrumentationEnabled) {
++        if (ok2)
++          ++_workStatistics.linearSolveSuccesses;
++        else
++          ++_workStatistics.linearSolveFailures;
++      }
++#endif
+       if (globalStats) {
+         globalStats->timeLinearSolution+=get_monotonic_time()-t;
+         t=get_monotonic_time();
+@@ -120,6 +170,12 @@ namespace g2o {
+       // restore the diagonal
+       _solver->restoreDiagonal();
+ 
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++      if (_workInstrumentationEnabled) {
++        ++_workStatistics.residualSweeps;
++        _workStatistics.residualEdgeEvaluations += _optimizer->activeEdges().size();
++      }
++#endif
+       _optimizer->computeActiveErrors();
+       tempChi = _optimizer->activeRobustChi2();
+ 
+@@ -132,6 +188,10 @@ namespace g2o {
+       rho /=  scale;
+ 
+       if (rho>0 && g2o_isfinite(tempChi)){ // last step was good
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++        if (_workInstrumentationEnabled)
++          ++_workStatistics.acceptedTrials;
++#endif
+         double alpha = 1.-pow((2*rho-1),3);
+         // crop lambda between minimum and maximum factors
+         alpha = (std::min)(alpha, _goodStepUpperScale);
+@@ -141,6 +201,10 @@ namespace g2o {
+         currentChi=tempChi;
+         _optimizer->discardTop();
+       } else {
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++        if (_workInstrumentationEnabled)
++          ++_workStatistics.rejectedTrials;
++#endif
+         _currentLambda*=_ni;
+         _ni*=2;
+         _optimizer->pop(); // restore the last state before trying to optimize
+@@ -148,8 +212,20 @@ namespace g2o {
+       qmax++;
+     } while (rho<0 && qmax < _maxTrialsAfterFailure->value() && ! _optimizer->terminate());
+ 
+-    if (qmax == _maxTrialsAfterFailure->value() || rho==0)
++    if (qmax == _maxTrialsAfterFailure->value()) {
++      _lastTerminationReason = TerminationMaxTrials;
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++      recordTerminalWork(currentChi);
++#endif
++      return Terminate;
++    }
++    if (rho==0) {
++      _lastTerminationReason = TerminationZeroGain;
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++      recordTerminalWork(currentChi);
++#endif
+       return Terminate;
++    }
+ 
+     //Stop criterium (Raul)
+     if((iniChi-currentChi)*1e3<iniChi)
+@@ -157,9 +233,17 @@ namespace g2o {
+     else
+         _nBad=0;
+ 
+-    if(_nBad>=3)
++    if(_nBad>=3) {
++        _lastTerminationReason = TerminationSmallImprovement;
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++        recordTerminalWork(currentChi);
++#endif
+         return Terminate;
++    }
+ 
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++    recordTerminalWork(currentChi);
++#endif
+     return OK;
+   }
+ 
+diff --git a/Thirdparty/g2o/g2o/core/optimization_algorithm_levenberg.h b/Thirdparty/g2o/g2o/core/optimization_algorithm_levenberg.h
+index bc4a4a0..3cb5427 100644
+--- a/Thirdparty/g2o/g2o/core/optimization_algorithm_levenberg.h
++++ b/Thirdparty/g2o/g2o/core/optimization_algorithm_levenberg.h
+@@ -28,6 +28,12 @@
+ #define G2O_SOLVER_LEVENBERG_H
+ 
+ #include "optimization_algorithm_with_hessian.h"
++#include <cstddef>
++#include <limits>
++
++#ifndef ORB_SLAM2_REALIZED_WORK_COUNTERS
++#define ORB_SLAM2_REALIZED_WORK_COUNTERS 1
++#endif
+ 
+ namespace g2o {
+ 
+@@ -37,6 +43,41 @@ namespace g2o {
+   class  OptimizationAlgorithmLevenberg : public OptimizationAlgorithmWithHessian
+   {
+     public:
++      enum TerminationReason {
++        TerminationNone = 0,
++        TerminationMaxTrials,
++        TerminationZeroGain,
++        TerminationSmallImprovement
++      };
++
++      struct WorkStatistics {
++        int lmTrials;
++        int acceptedTrials;
++        int rejectedTrials;
++        int linearSolveAttempts;
++        int linearSolveSuccesses;
++        int linearSolveFailures;
++        int residualSweeps;
++        size_t residualEdgeEvaluations;
++        int jacobianBuilds;
++        size_t jacobianEdgeEvaluations;
++        size_t hessianDimension;
++        double initialRobustChi2;
++        double finalRobustChi2;
++        double terminalDamping;
++        double objectiveReduction;
++
++        WorkStatistics()
++          : lmTrials(0), acceptedTrials(0), rejectedTrials(0),
++            linearSolveAttempts(0), linearSolveSuccesses(0),
++            linearSolveFailures(0), residualSweeps(0),
++            residualEdgeEvaluations(0), jacobianBuilds(0),
++            jacobianEdgeEvaluations(0), hessianDimension(0),
++            initialRobustChi2(std::numeric_limits<double>::quiet_NaN()),
++            finalRobustChi2(std::numeric_limits<double>::quiet_NaN()),
++            terminalDamping(std::numeric_limits<double>::quiet_NaN()),
++            objectiveReduction(std::numeric_limits<double>::quiet_NaN()) {}
++      };
+       /**
+        * construct the Levenberg algorithm, which will use the given Solver for solving the
+        * linearized system.
+@@ -64,6 +105,20 @@ namespace g2o {
+ 
+       //! return the number of levenberg iterations performed in the last round
+       int levenbergIteration() { return _levenbergIterations;}
++      TerminationReason lastTerminationReason() const { return _lastTerminationReason; }
++      void setWorkInstrumentationEnabled(bool enabled) {
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++        _workInstrumentationEnabled = enabled;
++#else
++        (void)enabled;
++        _workInstrumentationEnabled = false;
++#endif
++      }
++      bool workInstrumentationEnabled() const {
++        return _workInstrumentationEnabled;
++      }
++      void resetWorkStatistics() { _workStatistics = WorkStatistics(); }
++      const WorkStatistics& workStatistics() const { return _workStatistics; }
+ 
+     protected:
+       // Levenberg parameters
+@@ -77,6 +132,9 @@ namespace g2o {
+       int _levenbergIterations;   ///< the numer of levenberg iterations performed to accept the last step
+       //RAUL
+       int _nBad;
++      TerminationReason _lastTerminationReason;
++      bool _workInstrumentationEnabled;
++      WorkStatistics _workStatistics;
+ 
+       /**
+        * helper for Levenberg, this function computes the initial damping factor, if the user did not
+diff --git a/Thirdparty/g2o/g2o/core/sparse_optimizer.cpp b/Thirdparty/g2o/g2o/core/sparse_optimizer.cpp
+index 7c316e6..2728593 100644
+--- a/Thirdparty/g2o/g2o/core/sparse_optimizer.cpp
++++ b/Thirdparty/g2o/g2o/core/sparse_optimizer.cpp
+@@ -48,7 +48,8 @@ namespace g2o{
+ 
+ 
+   SparseOptimizer::SparseOptimizer() :
+-    _forceStopFlag(0), _verbose(false), _algorithm(0), _computeBatchStatistics(false)
++    _forceStopFlag(0), _verbose(false), _algorithm(0), _computeBatchStatistics(false),
++    _workInstrumentationEnabled(false)
+   {
+     _graphActions.resize(AT_NUM_ELEMENTS);
+   }
+@@ -353,8 +354,20 @@ namespace g2o{
+ 
+   int SparseOptimizer::optimize(int iterations, bool online)
+   {
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++    if (_workInstrumentationEnabled) {
++      _lastOptimizationRunStatistics = OptimizationRunStatistics();
++      _lastOptimizationRunStatistics.requestedIterations = iterations;
++    }
++#endif
+     if (_ivMap.size() == 0) {
+       cerr << __PRETTY_FUNCTION__ << ": 0 vertices to optimize, maybe forgot to call initializeOptimization()" << endl;
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++      if (_workInstrumentationEnabled) {
++        _lastOptimizationRunStatistics.rawReturnValue = -1;
++        _lastOptimizationRunStatistics.stopReason = OptimizationEmptyActiveGraph;
++      }
++#endif
+       return -1;
+     }
+ 
+@@ -365,6 +378,12 @@ namespace g2o{
+     ok = _algorithm->init(online);
+     if (! ok) {
+       cerr << __PRETTY_FUNCTION__ << " Error while initializing" << endl;
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++      if (_workInstrumentationEnabled) {
++        _lastOptimizationRunStatistics.rawReturnValue = -1;
++        _lastOptimizationRunStatistics.stopReason = OptimizationInitializationFailure;
++      }
++#endif
+       return -1;
+     }
+ 
+@@ -374,6 +393,10 @@ namespace g2o{
+     
+     OptimizationAlgorithm::SolverResult result = OptimizationAlgorithm::OK;
+     for (int i=0; i<iterations && ! terminate() && ok; i++){
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++      if (_workInstrumentationEnabled)
++        ++_lastOptimizationRunStatistics.outerIterationsStarted;
++#endif
+       preIteration(i);
+ 
+       if (_computeBatchStatistics) {
+@@ -411,10 +434,38 @@ namespace g2o{
+       }
+       ++cjIterations; 
+       postIteration(i);
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++      if (_workInstrumentationEnabled)
++        ++_lastOptimizationRunStatistics.outerIterationsCompleted;
++#endif
+     }
+     if (result == OptimizationAlgorithm::Fail) {
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++      if (_workInstrumentationEnabled) {
++        _lastOptimizationRunStatistics.rawReturnValue = 0;
++        _lastOptimizationRunStatistics.lastSolverResult = result;
++        _lastOptimizationRunStatistics.stopReason = OptimizationAlgorithmFail;
++      }
++#endif
+       return 0;
+     }
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++    if (_workInstrumentationEnabled) {
++      _lastOptimizationRunStatistics.rawReturnValue = cjIterations;
++      _lastOptimizationRunStatistics.lastSolverResult = result;
++      _lastOptimizationRunStatistics.capReached = iterations > 0 && cjIterations >= iterations;
++      if (iterations <= 0)
++        _lastOptimizationRunStatistics.stopReason = OptimizationZeroRequestedIterations;
++      else if (result == OptimizationAlgorithm::Terminate)
++        _lastOptimizationRunStatistics.stopReason = OptimizationAlgorithmTerminate;
++      else if (terminate())
++        _lastOptimizationRunStatistics.stopReason = OptimizationExternalStop;
++      else if (_lastOptimizationRunStatistics.capReached)
++        _lastOptimizationRunStatistics.stopReason = OptimizationRequestedMaximum;
++      else
++        _lastOptimizationRunStatistics.stopReason = OptimizationOtherStop;
++    }
++#endif
+     return cjIterations;
+   }
+ 
+diff --git a/Thirdparty/g2o/g2o/core/sparse_optimizer.h b/Thirdparty/g2o/g2o/core/sparse_optimizer.h
+index 3b09f5a..1239b54 100644
+--- a/Thirdparty/g2o/g2o/core/sparse_optimizer.h
++++ b/Thirdparty/g2o/g2o/core/sparse_optimizer.h
+@@ -35,6 +35,10 @@
+ 
+ #include <map>
+ 
++#ifndef ORB_SLAM2_REALIZED_WORK_COUNTERS
++#define ORB_SLAM2_REALIZED_WORK_COUNTERS 1
++#endif
++
+ namespace g2o {
+ 
+   // forward declaration
+@@ -45,6 +49,34 @@ namespace g2o {
+   class  SparseOptimizer : public OptimizableGraph {
+ 
+     public:
++    enum OptimizationStopReason {
++      OptimizationNotRun = 0,
++      OptimizationRequestedMaximum,
++      OptimizationAlgorithmTerminate,
++      OptimizationAlgorithmFail,
++      OptimizationExternalStop,
++      OptimizationEmptyActiveGraph,
++      OptimizationInitializationFailure,
++      OptimizationZeroRequestedIterations,
++      OptimizationOtherStop
++    };
++
++    struct OptimizationRunStatistics {
++      int requestedIterations;
++      int outerIterationsStarted;
++      int outerIterationsCompleted;
++      int rawReturnValue;
++      int lastSolverResult;
++      bool capReached;
++      OptimizationStopReason stopReason;
++
++      OptimizationRunStatistics()
++        : requestedIterations(0), outerIterationsStarted(0),
++          outerIterationsCompleted(0), rawReturnValue(0),
++          lastSolverResult(0), capReached(false),
++          stopReason(OptimizationNotRun) {}
++    };
++
+     enum {
+       AT_COMPUTEACTIVERROR = OptimizableGraph::AT_NUM_ELEMENTS,
+       AT_NUM_ELEMENTS, // keep as last element
+@@ -120,6 +152,21 @@ namespace g2o {
+      */
+     int optimize(int iterations, bool online = false);
+ 
++    void setWorkInstrumentationEnabled(bool enabled) {
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++      _workInstrumentationEnabled = enabled;
++#else
++      (void)enabled;
++      _workInstrumentationEnabled = false;
++#endif
++    }
++    bool workInstrumentationEnabled() const {
++      return _workInstrumentationEnabled;
++    }
++    const OptimizationRunStatistics& lastOptimizationRunStatistics() const {
++      return _lastOptimizationRunStatistics;
++    }
++
+     /**
+      * computes the blocks of the inverse of the specified pattern.
+      * the pattern is given via pairs <row, col> of the blocks in the hessian
+@@ -306,6 +353,8 @@ namespace g2o {
+ 
+     BatchStatisticsContainer _batchStatistics;   ///< global statistics of the optimizer, e.g., timing, num-non-zeros
+     bool _computeBatchStatistics;
++    bool _workInstrumentationEnabled;
++    OptimizationRunStatistics _lastOptimizationRunStatistics;
+   };
+ } // end namespace
+ 
+diff --git a/include/Optimizer.h b/include/Optimizer.h
+index 54f60e9..0920ee8 100644
+--- a/include/Optimizer.h
++++ b/include/Optimizer.h
+@@ -50,6 +50,9 @@ class Optimizer
+ {
+ public:
+ 
++    /** Flush buffered/count-only realized-work records at controlled shutdown. */
++    void static FlushRealizedWorkLog();
++
+     /**
+      * @brief bundle adjustment Optimization
+      * 
+@@ -131,7 +134,8 @@ public:
+      * @param   pFrame Frame
+      * @return  inliers数量
+      */
+-    int static PoseOptimization(Frame* pFrame);
++    int static PoseOptimization(Frame* pFrame,
++                                const char* callSource = "DIRECT");
+ 
+     // if bFixScale is true, 6DoF optimization (stereo,rgbd), 7DoF otherwise (mono)
+     /**
+diff --git a/src/Optimizer.cc b/src/Optimizer.cc
+index 2927279..b17cbab 100644
+--- a/src/Optimizer.cc
++++ b/src/Optimizer.cc
+@@ -30,6 +30,7 @@
+ */
+ 
+ #include "Optimizer.h"
++#include "BSRWSnapshot.h"
+ 
+ #include "Thirdparty/g2o/g2o/core/block_solver.h"
+ #include "Thirdparty/g2o/g2o/core/optimization_algorithm_levenberg.h"
+@@ -54,12 +55,818 @@
+ #include<random>
+ #include<cstdint>
+ #include<cstdlib>
++#include<string>
++#include<array>
++#include<sstream>
++#include<exception>
++#include<condition_variable>
++#include<deque>
++#include<map>
++#include<memory>
++#include<thread>
++#include<cstring>
++#include<cstdio>
++#include<cctype>
+ 
+ namespace ORB_SLAM2
+ {
+ 
+ namespace
+ {
++std::string SnapshotSafeToken(const std::string& value)
++{
++    std::string result=value.empty()?"UNSPECIFIED":value;
++    for(std::size_t i=0;i<result.size();++i)
++        if(!std::isalnum(static_cast<unsigned char>(result[i]))
++           && result[i]!='-' && result[i]!='_')
++            result[i]='_';
++    return result;
++}
++
++std::size_t SnapshotActiveEdgeCount(
++    const std::vector<g2o::EdgeSE3ProjectXYZOnlyPose*>& mono,
++    const std::vector<g2o::EdgeStereoSE3ProjectXYZOnlyPose*>& stereo)
++{
++    std::size_t count=0;
++    for(std::size_t i=0;i<mono.size();++i)
++        if(mono[i]->level()==0) ++count;
++    for(std::size_t i=0;i<stereo.size();++i)
++        if(stereo[i]->level()==0) ++count;
++    return count;
++}
++
++void ExportPoseOptimizationSnapshot(
++    const char *directory,
++    const Frame *frame,
++    const g2o::VertexSE3Expmap *vertex,
++    const std::vector<g2o::EdgeSE3ProjectXYZOnlyPose*>& mono,
++    const std::vector<std::size_t>& monoIndices,
++    const std::vector<g2o::EdgeStereoSE3ProjectXYZOnlyPose*>& stereo,
++    const std::vector<std::size_t>& stereoIndices,
++    const std::vector<std::uint64_t>& mapPointIds,
++    const std::vector<double>& baseInformation,
++    const std::vector<double>& temporalReliability,
++    const std::vector<double>& beliefReliability,
++    const std::vector<double>& finalReliability,
++    const std::uint64_t invocationId,
++    const char *callSource,
++    const int roundId,
++    const int budget,
++    const double monoThreshold,
++    const double stereoThreshold)
++{
++    if(!directory || !directory[0]) return;
++    const std::size_t activeBefore=SnapshotActiveEdgeCount(mono,stereo);
++    BSRW::Snapshot snapshot;
++    const char *runValue=std::getenv("ORB_SLAM2_BSRW_SOURCE_RUN_ID");
++    snapshot.source_run_id=runValue&&runValue[0]?runValue:"UNSPECIFIED";
++    snapshot.frame_id=frame?frame->mnId:0;
++    snapshot.caller_id=std::string(callSource&&callSource[0]?callSource:"UNKNOWN")
++        +"#"+std::to_string(invocationId);
++    snapshot.round_id=roundId;
++    snapshot.budget=budget;
++    snapshot.mono_outlier_threshold=monoThreshold;
++    snapshot.stereo_outlier_threshold=stereoThreshold;
++    snapshot.orb_slam2_head="7a9200ba9a1ad3006a9fbad02163d31437135371";
++    snapshot.g2o_version="ORB-SLAM2 bundled g2o + realized-work counters";
++    snapshot.ceres_version="2.2.0";
++    const std::string id=SnapshotSafeToken(snapshot.source_run_id)
++        +"_f"+std::to_string(snapshot.frame_id)
++        +"_c"+std::to_string(invocationId)
++        +"_r"+std::to_string(roundId);
++    snapshot.snapshot_id=id;
++    const g2o::SE3Quat estimate=vertex->estimate();
++    snapshot.initial_pose.translation=estimate.translation();
++    snapshot.initial_pose.quaternion=estimate.rotation();
++    snapshot.initial_pose.quaternion.normalize();
++    snapshot.camera.fx=frame->fx;
++    snapshot.camera.fy=frame->fy;
++    snapshot.camera.cx=frame->cx;
++    snapshot.camera.cy=frame->cy;
++    snapshot.camera.bf=frame->mbf;
++
++    for(std::size_t edgeIndex=0;edgeIndex<mono.size();++edgeIndex)
++    {
++        const std::size_t feature=monoIndices[edgeIndex];
++        const g2o::EdgeSE3ProjectXYZOnlyPose *edge=mono[edgeIndex];
++        BSRW::Observation observation;
++        observation.observation_id=feature;
++        observation.map_point_id=mapPointIds[feature];
++        observation.type="mono";
++        observation.point_w=edge->Xw;
++        observation.dimension=2;
++        observation.measurement.push_back(edge->measurement()[0]);
++        observation.measurement.push_back(edge->measurement()[1]);
++        observation.information.topLeftCorner<2,2>()=edge->information();
++        observation.base_information_scale=baseInformation[feature];
++        observation.temporal_reliability=temporalReliability[feature];
++        observation.belief_reliability=beliefReliability[feature];
++        observation.final_reliability=finalReliability[feature];
++        observation.active=edge->level()==0;
++        observation.use_huber=edge->robustKernel()!=NULL;
++        observation.huber_delta=observation.use_huber
++            ?edge->robustKernel()->delta():std::sqrt(monoThreshold);
++        snapshot.observations.push_back(observation);
++    }
++    for(std::size_t edgeIndex=0;edgeIndex<stereo.size();++edgeIndex)
++    {
++        const std::size_t feature=stereoIndices[edgeIndex];
++        const g2o::EdgeStereoSE3ProjectXYZOnlyPose *edge=stereo[edgeIndex];
++        BSRW::Observation observation;
++        observation.observation_id=feature;
++        observation.map_point_id=mapPointIds[feature];
++        observation.type="stereo_rgbd";
++        observation.point_w=edge->Xw;
++        observation.dimension=3;
++        for(int i=0;i<3;++i) observation.measurement.push_back(edge->measurement()[i]);
++        observation.information=edge->information();
++        observation.base_information_scale=baseInformation[feature];
++        observation.temporal_reliability=temporalReliability[feature];
++        observation.belief_reliability=beliefReliability[feature];
++        observation.final_reliability=finalReliability[feature];
++        observation.active=edge->level()==0;
++        observation.use_huber=edge->robustKernel()!=NULL;
++        observation.huber_delta=observation.use_huber
++            ?edge->robustKernel()->delta():std::sqrt(stereoThreshold);
++        snapshot.observations.push_back(observation);
++    }
++    std::sort(snapshot.observations.begin(),snapshot.observations.end(),
++        [](const BSRW::Observation& first,const BSRW::Observation& second)
++        { return first.observation_id<second.observation_id; });
++    const std::string path=std::string(directory)
++        +(directory[std::strlen(directory)-1]=='/'?"":"/")
++        +"snapshot_"+id+".json";
++    std::string inputHash;
++    std::string error;
++    if(!BSRW::WriteSnapshot(snapshot,path,&inputHash,&error))
++        throw std::runtime_error("BSRW snapshot export failed: "+error);
++    const std::size_t activeAfter=SnapshotActiveEdgeCount(mono,stereo);
++    if(activeBefore!=activeAfter)
++        throw std::runtime_error("BSRW snapshot export changed active observations");
++    std::cout<<"[BSRWSnapshot] path="<<path
++             <<" active="<<activeAfter
++             <<" input_sha256="<<inputHash<<std::endl;
++}
++
++// Selectively migrated from the frozen realized-work implementation.  RWBC,
++// observation-identity, and V5 semantic-motion code are intentionally absent.
++std::uint64_t NextPoseBudgetInvocation()
++{
++    static std::mutex mutex;
++    static std::uint64_t invocation = 0;
++    std::unique_lock<std::mutex> lock(mutex);
++    return ++invocation;
++}
++
++const char *SparseOptimizationStopReasonName(
++    const g2o::SparseOptimizer::OptimizationStopReason reason)
++{
++    switch(reason)
++    {
++    case g2o::SparseOptimizer::OptimizationRequestedMaximum:
++        return "REQUESTED_MAXIMUM";
++    case g2o::SparseOptimizer::OptimizationAlgorithmTerminate:
++        return "ALGORITHM_TERMINATE";
++    case g2o::SparseOptimizer::OptimizationAlgorithmFail:
++        return "ALGORITHM_FAIL";
++    case g2o::SparseOptimizer::OptimizationExternalStop:
++        return "EXTERNAL_STOP";
++    case g2o::SparseOptimizer::OptimizationEmptyActiveGraph:
++        return "EMPTY_ACTIVE_GRAPH";
++    case g2o::SparseOptimizer::OptimizationInitializationFailure:
++        return "INITIALIZATION_FAILURE";
++    case g2o::SparseOptimizer::OptimizationZeroRequestedIterations:
++        return "ZERO_REQUESTED_ITERATIONS";
++    case g2o::SparseOptimizer::OptimizationOtherStop:
++        return "OTHER_STOP";
++    default:
++        return "NOT_RUN";
++    }
++}
++
++const char *LmTerminationReasonName(
++    const g2o::OptimizationAlgorithmLevenberg::TerminationReason reason)
++{
++    switch(reason)
++    {
++    case g2o::OptimizationAlgorithmLevenberg::TerminationMaxTrials:
++        return "LM_MAX_TRIALS";
++    case g2o::OptimizationAlgorithmLevenberg::TerminationZeroGain:
++        return "LM_ZERO_GAIN";
++    case g2o::OptimizationAlgorithmLevenberg::TerminationSmallImprovement:
++        return "LM_SMALL_IMPROVEMENT";
++    default:
++        return "NONE";
++    }
++}
++
++struct RealizedWorkRoundRecord
++{
++    bool executed;
++    int requested;
++    bool initializeOk;
++    int activeEdges;
++    int activeVertices;
++    int optimizeReturn;
++    double optimizeMs;
++    g2o::SparseOptimizer::OptimizationRunStatistics sparse;
++    g2o::OptimizationAlgorithmLevenberg::WorkStatistics lm;
++    g2o::OptimizationAlgorithmLevenberg::TerminationReason lmTermination;
++
++    RealizedWorkRoundRecord()
++        : executed(false), requested(0), initializeOk(false), activeEdges(0),
++          activeVertices(0), optimizeReturn(0), optimizeMs(0.0),
++          lmTermination(g2o::OptimizationAlgorithmLevenberg::TerminationNone) {}
++};
++
++struct RealizedWorkInvocationRecord
++{
++    bool enabled;
++    unsigned long frameId;
++    std::uint64_t invocationId;
++    char callSource[48];
++    char status[48];
++    int initialCorrespondences;
++    int executedRounds;
++    double poseOptimizationTotalMs;
++    bool legacyBudgetLogEnabled;
++    bool legacyIterationLogEnabled;
++    std::array<RealizedWorkRoundRecord,4> rounds;
++
++    RealizedWorkInvocationRecord()
++        : enabled(false), frameId(0), invocationId(0),
++          initialCorrespondences(0), executedRounds(0),
++          poseOptimizationTotalMs(0.0), legacyBudgetLogEnabled(false),
++          legacyIterationLogEnabled(false)
++    {
++        std::strcpy(callSource,"UNKNOWN");
++        std::strcpy(status,"STARTED");
++    }
++};
++
++void CopyFixedText(char *destination, const std::size_t capacity,
++                   const char *source)
++{
++    if(!capacity)
++        return;
++    const char *safe=source?source:"";
++    std::strncpy(destination,safe,capacity-1);
++    destination[capacity-1]='\0';
++}
++
++enum RealizedWorkMode
++{
++    RealizedWorkOff=0,
++    RealizedWorkCountOnly,
++    RealizedWorkBuffered,
++    RealizedWorkSynchronous
++};
++
++RealizedWorkMode CurrentRealizedWorkMode()
++{
++    const char *mode=std::getenv("ORB_SLAM2_REALIZED_WORK_MODE");
++    if(!mode || !mode[0])
++        mode=std::getenv("ORB_SLAM2_REALIZED_WORK_LOG_MODE");
++    if(!mode || !mode[0] || std::strcmp(mode,"OFF")==0)
++        return RealizedWorkOff;
++    if(std::strcmp(mode,"COUNT_ONLY")==0)
++        return RealizedWorkCountOnly;
++    if(std::strcmp(mode,"BUFFERED")==0)
++        return RealizedWorkBuffered;
++    if(std::strcmp(mode,"SYNC")==0)
++        return RealizedWorkSynchronous;
++    return RealizedWorkOff;
++}
++
++class CountOnlyRealizedWorkStore
++{
++public:
++    static const std::size_t kCapacity=1024;
++
++    static CountOnlyRealizedWorkStore &Instance()
++    {
++        static CountOnlyRealizedWorkStore store;
++        return store;
++    }
++
++    bool Store(const RealizedWorkInvocationRecord &record, const char *path)
++    {
++        if(size_>=kCapacity)
++        {
++            overflow_=true;
++            return false;
++        }
++        if(size_==0)
++            CopyFixedText(path_,sizeof(path_),path);
++        else if(std::strncmp(path_,path?path:"",sizeof(path_))!=0)
++        {
++            pathMismatch_=true;
++            return false;
++        }
++        records_[size_++]=record;
++        return true;
++    }
++
++    const RealizedWorkInvocationRecord *Records() const { return records_; }
++    std::size_t Size() const { return size_; }
++    const char *Path() const { return path_; }
++    bool Overflow() const { return overflow_; }
++    bool PathMismatch() const { return pathMismatch_; }
++    void Clear()
++    {
++        size_=0;
++        overflow_=false;
++        pathMismatch_=false;
++        path_[0]='\0';
++    }
++
++private:
++    CountOnlyRealizedWorkStore()
++        : size_(0), overflow_(false), pathMismatch_(false)
++    { path_[0]='\0'; }
++    RealizedWorkInvocationRecord records_[kCapacity];
++    std::size_t size_;
++    bool overflow_;
++    bool pathMismatch_;
++    char path_[4096];
++};
++bool AppendCsvRow(const std::string &path, const char *header,
++                  const std::string &row)
++{
++    std::ifstream check(path.c_str());
++    const bool writeHeader = !check.good()
++        || check.peek() == std::ifstream::traits_type::eof();
++    check.close();
++    std::ofstream output(path.c_str(), std::ios::app);
++    if(!output)
++        return false;
++    if(writeHeader)
++        output << header << '\n';
++    output << row << '\n';
++    return output.good();
++}
++
++const char *kRealizedWorkInvocationHeader =
++    "schema_version,frame_id,optimizer_invocation_id,call_source,status,"
++    "initial_correspondences,executed_rounds,total_requested_outer_iterations,"
++    "total_outer_started,total_outer_completed,total_lm_trials,"
++    "total_accepted_trials,total_rejected_trials,total_linear_solve_attempts,"
++    "total_linear_solve_successes,total_linear_solve_failures,"
++    "total_residual_sweeps,total_residual_edge_evaluations,"
++    "total_jacobian_builds,total_jacobian_edge_evaluations,"
++    "total_solver_core_ms,pose_optimization_total_ms,"
++    "legacy_budget_log_enabled,legacy_iteration_log_enabled";
++
++const char *kRealizedWorkRoundHeader =
++    "schema_version,frame_id,optimizer_invocation_id,call_source,round,"
++    "executed,requested,initialize_ok,active_edges,active_vertices,"
++    "hessian_dimension,optimize_return,outer_started,outer_completed,"
++    "last_solver_result,cap_reached,sparse_stop_reason,lm_stop_reason,"
++    "lm_trials,accepted_trials,rejected_trials,linear_solve_attempts,"
++    "linear_solve_successes,linear_solve_failures,residual_sweeps,"
++    "residual_edge_evaluations,jacobian_builds,jacobian_edge_evaluations,"
++    "initial_robust_chi2,final_robust_chi2,terminal_damping,objective_reduction,"
++    "optimize_ms";
++
++const char *kRealizedWorkIoHeader =
++    "schema_version,frame_id,optimizer_invocation_id,payload_write_ms,write_ok";
++
++struct SerializedRealizedWorkPayload
++{
++    std::string path;
++    unsigned long frameId;
++    std::uint64_t invocationId;
++    std::string invocationRow;
++    std::array<std::string,4> roundRows;
++    double producerSerializationMs;
++    double producerEnqueueMs;
++    double queueWaitMs;
++    std::size_t queueDepthBefore;
++    std::size_t queueDepthAfter;
++    std::size_t maxQueueDepthAtEnqueue;
++};
++
++class BufferedRealizedWorkLogger
++{
++public:
++    static BufferedRealizedWorkLogger &Instance()
++    {
++        static BufferedRealizedWorkLogger logger;
++        return logger;
++    }
++
++    bool Enqueue(const std::shared_ptr<SerializedRealizedWorkPayload> &payload,
++                 const std::chrono::steady_clock::time_point &producerStart)
++    {
++        std::unique_lock<std::mutex> lock(mutex_);
++        spaceAvailable_.wait(lock,[this] { return queue_.size()<kCapacity || stopping_; });
++        if(stopping_)
++        {
++            failure_=true;
++            return false;
++        }
++        payload->queueWaitMs=std::chrono::duration_cast<
++            std::chrono::duration<double,std::milli> >(
++                std::chrono::steady_clock::now()-producerStart).count();
++        payload->queueDepthBefore=queue_.size();
++        queue_.push_back(QueueItem(payload,0));
++        payload->queueDepthAfter=queue_.size();
++        maxQueueDepth_=std::max(maxQueueDepth_,queue_.size());
++        payload->maxQueueDepthAtEnqueue=maxQueueDepth_;
++        payload->producerEnqueueMs=std::chrono::duration_cast<
++            std::chrono::duration<double,std::milli> >(
++                std::chrono::steady_clock::now()-producerStart).count();
++        workAvailable_.notify_one();
++        return true;
++    }
++
++    void Flush()
++    {
++        std::unique_lock<std::mutex> lock(mutex_);
++        const std::uint64_t fence=++nextFence_;
++        queue_.push_back(QueueItem(std::shared_ptr<SerializedRealizedWorkPayload>(),fence));
++        workAvailable_.notify_one();
++        fenceCompleted_.wait(lock,[this,fence] { return completedFence_>=fence; });
++    }
++
++    bool HadFailure()
++    {
++        std::unique_lock<std::mutex> lock(mutex_);
++        return failure_;
++    }
++
++private:
++    struct QueueItem
++    {
++        std::shared_ptr<SerializedRealizedWorkPayload> payload;
++        std::uint64_t fence;
++        QueueItem(const std::shared_ptr<SerializedRealizedWorkPayload> &p,
++                  std::uint64_t f) : payload(p), fence(f) {}
++    };
++
++    struct StreamSet
++    {
++        std::ofstream invocation;
++        std::ofstream rounds;
++        std::ofstream io;
++        std::ofstream transport;
++        bool openOk;
++        StreamSet() : openOk(false) {}
++    };
++
++    static const std::size_t kCapacity=256;
++    static const std::size_t kFlushBatch=64;
++
++    BufferedRealizedWorkLogger()
++        : stopping_(false), nextFence_(0), completedFence_(0),
++          writesSinceFlush_(0), failure_(false),
++          worker_(&BufferedRealizedWorkLogger::Worker,this) {}
++
++    ~BufferedRealizedWorkLogger()
++    {
++        {
++            std::unique_lock<std::mutex> lock(mutex_);
++            stopping_=true;
++            workAvailable_.notify_one();
++            spaceAvailable_.notify_all();
++        }
++        worker_.join();
++    }
++
++    BufferedRealizedWorkLogger(const BufferedRealizedWorkLogger&);
++    BufferedRealizedWorkLogger& operator=(const BufferedRealizedWorkLogger&);
++
++    static bool EmptyOrMissing(const std::string &path)
++    {
++        std::ifstream input(path.c_str());
++        return !input.good() || input.peek()==std::ifstream::traits_type::eof();
++    }
++
++    StreamSet &Streams(const std::string &path)
++    {
++        std::map<std::string,std::unique_ptr<StreamSet> >::iterator found=streams_.find(path);
++        if(found!=streams_.end())
++            return *found->second;
++        std::unique_ptr<StreamSet> streams(new StreamSet);
++        const bool invocationHeader=EmptyOrMissing(path);
++        const bool roundHeader=EmptyOrMissing(path+".rounds.csv");
++        const bool ioHeader=EmptyOrMissing(path+".io.csv");
++        const bool transportHeader=EmptyOrMissing(path+".transport.csv");
++        streams->invocation.open(path.c_str(),std::ios::app);
++        streams->rounds.open((path+".rounds.csv").c_str(),std::ios::app);
++        streams->io.open((path+".io.csv").c_str(),std::ios::app);
++        streams->transport.open((path+".transport.csv").c_str(),std::ios::app);
++        streams->openOk=streams->invocation.good() && streams->rounds.good()
++            && streams->io.good() && streams->transport.good();
++        if(streams->openOk)
++        {
++            if(invocationHeader) streams->invocation << kRealizedWorkInvocationHeader << '\n';
++            if(roundHeader) streams->rounds << kRealizedWorkRoundHeader << '\n';
++            if(ioHeader) streams->io << kRealizedWorkIoHeader << '\n';
++            if(transportHeader)
++                streams->transport << "schema_version,frame_id,optimizer_invocation_id,"
++                    "logger_mode,producer_serialization_ms,producer_enqueue_ms,"
++                    "queue_wait_ms,queue_depth_before,queue_depth_after,"
++                    "max_queue_depth,consumer_write_ms,write_ok\n";
++        }
++        StreamSet &answer=*streams;
++        streams_[path]=std::move(streams);
++        return answer;
++    }
++
++    bool FlushStreams()
++    {
++        bool ok=true;
++        for(std::map<std::string,std::unique_ptr<StreamSet> >::iterator it=streams_.begin();
++            it!=streams_.end();++it)
++        {
++            StreamSet &s=*it->second;
++            s.invocation.flush(); s.rounds.flush(); s.io.flush(); s.transport.flush();
++            ok=s.invocation.good() && s.rounds.good() && s.io.good()
++                && s.transport.good() && ok;
++        }
++        writesSinceFlush_=0;
++        return ok;
++    }
++
++    void Write(const std::shared_ptr<SerializedRealizedWorkPayload> &payload)
++    {
++        const std::chrono::steady_clock::time_point writeStart=
++            std::chrono::steady_clock::now();
++        StreamSet &s=Streams(payload->path);
++        bool ok=s.openOk;
++        if(ok)
++        {
++            s.invocation << payload->invocationRow << '\n';
++            for(std::size_t i=0;i<payload->roundRows.size();++i)
++                s.rounds << payload->roundRows[i] << '\n';
++            ok=s.invocation.good() && s.rounds.good();
++        }
++        const double consumerWriteMs=std::chrono::duration_cast<
++            std::chrono::duration<double,std::milli> >(
++                std::chrono::steady_clock::now()-writeStart).count();
++        if(s.openOk)
++        {
++            s.io << std::setprecision(17) << "REALIZED_LM_WORK_V2,"
++                 << payload->frameId << ',' << payload->invocationId << ','
++                 << consumerWriteMs << ',' << (ok?1:0) << '\n';
++            s.transport << std::setprecision(17) << "REALIZED_LM_WORK_TRANSPORT_V1,"
++                        << payload->frameId << ',' << payload->invocationId
++                        << ",BUFFERED," << payload->producerSerializationMs << ','
++                        << payload->producerEnqueueMs << ',' << payload->queueWaitMs
++                        << ',' << payload->queueDepthBefore << ','
++                        << payload->queueDepthAfter << ','
++                        << payload->maxQueueDepthAtEnqueue << ','
++                        << consumerWriteMs << ',' << (ok?1:0) << '\n';
++            ok=s.io.good() && s.transport.good() && ok;
++        }
++        if(!ok)
++        {
++            failure_=true;
++            std::cerr << "[RealizedWork] buffered write failure for invocation "
++                      << payload->invocationId << std::endl;
++        }
++        ++writesSinceFlush_;
++        if(writesSinceFlush_>=kFlushBatch && !FlushStreams())
++        {
++            failure_=true;
++            std::cerr << "[RealizedWork] buffered flush failure" << std::endl;
++        }
++    }
++
++    void Worker()
++    {
++        for(;;)
++        {
++            QueueItem item(std::shared_ptr<SerializedRealizedWorkPayload>(),0);
++            {
++                std::unique_lock<std::mutex> lock(mutex_);
++                if(queue_.empty() && !stopping_)
++                {
++                    if(writesSinceFlush_)
++                        workAvailable_.wait_for(lock,std::chrono::milliseconds(250));
++                    else
++                        workAvailable_.wait(lock);
++                }
++                if(queue_.empty())
++                {
++                    if(stopping_)
++                        break;
++                    lock.unlock();
++                    if(writesSinceFlush_ && !FlushStreams())
++                    {
++                        failure_=true;
++                        std::cerr << "[RealizedWork] periodic flush failure" << std::endl;
++                    }
++                    continue;
++                }
++                item=queue_.front();
++                queue_.pop_front();
++                spaceAvailable_.notify_one();
++            }
++            if(item.payload)
++                Write(item.payload);
++            else
++            {
++                const bool ok=FlushStreams();
++                if(!ok)
++                {
++                    failure_=true;
++                    std::cerr << "[RealizedWork] explicit flush failure" << std::endl;
++                }
++                std::unique_lock<std::mutex> lock(mutex_);
++                completedFence_=std::max(completedFence_,item.fence);
++                fenceCompleted_.notify_all();
++            }
++        }
++        if(!FlushStreams())
++        {
++            failure_=true;
++            std::cerr << "[RealizedWork] shutdown flush failure" << std::endl;
++        }
++    }
++
++    std::mutex mutex_;
++    std::condition_variable workAvailable_;
++    std::condition_variable spaceAvailable_;
++    std::condition_variable fenceCompleted_;
++    std::deque<QueueItem> queue_;
++    bool stopping_;
++    std::uint64_t nextFence_;
++    std::uint64_t completedFence_;
++    std::size_t writesSinceFlush_;
++    std::size_t maxQueueDepth_=0;
++    bool failure_;
++    std::map<std::string,std::unique_ptr<StreamSet> > streams_;
++    std::thread worker_;
++};
++
++bool LogRealizedWorkInvocation(const std::string &path,
++                               const RealizedWorkInvocationRecord &record,
++                               const bool forceSynchronous=false)
++{
++    const std::chrono::steady_clock::time_point writeStart =
++        std::chrono::steady_clock::now();
++
++    int totalRequested=0, totalOuterStarted=0, totalOuterCompleted=0;
++    int totalLmTrials=0, totalAccepted=0, totalRejected=0;
++    int totalSolveAttempts=0, totalSolveSuccesses=0, totalSolveFailures=0;
++    int totalResidualSweeps=0, totalJacobianBuilds=0;
++    std::size_t totalResidualEdges=0, totalJacobianEdges=0;
++    double totalSolverCoreMs=0.0;
++    for(std::size_t i=0;i<record.rounds.size();++i)
++    {
++        const RealizedWorkRoundRecord &round=record.rounds[i];
++        if(!round.executed)
++            continue;
++        totalRequested+=round.requested;
++        totalOuterStarted+=round.sparse.outerIterationsStarted;
++        totalOuterCompleted+=round.sparse.outerIterationsCompleted;
++        totalLmTrials+=round.lm.lmTrials;
++        totalAccepted+=round.lm.acceptedTrials;
++        totalRejected+=round.lm.rejectedTrials;
++        totalSolveAttempts+=round.lm.linearSolveAttempts;
++        totalSolveSuccesses+=round.lm.linearSolveSuccesses;
++        totalSolveFailures+=round.lm.linearSolveFailures;
++        totalResidualSweeps+=round.lm.residualSweeps;
++        totalResidualEdges+=round.lm.residualEdgeEvaluations;
++        totalJacobianBuilds+=round.lm.jacobianBuilds;
++        totalJacobianEdges+=round.lm.jacobianEdgeEvaluations;
++        totalSolverCoreMs+=round.optimizeMs;
++    }
++
++    std::ostringstream invocationRow;
++    invocationRow << std::setprecision(17)
++        << "REALIZED_LM_WORK_V2," << record.frameId << ',' << record.invocationId
++        << ',' << record.callSource << ',' << record.status << ','
++        << record.initialCorrespondences << ',' << record.executedRounds << ','
++        << totalRequested << ',' << totalOuterStarted << ',' << totalOuterCompleted << ','
++        << totalLmTrials << ',' << totalAccepted << ',' << totalRejected << ','
++        << totalSolveAttempts << ',' << totalSolveSuccesses << ','
++        << totalSolveFailures << ',' << totalResidualSweeps << ','
++        << totalResidualEdges << ',' << totalJacobianBuilds << ','
++        << totalJacobianEdges << ',' << totalSolverCoreMs << ','
++        << record.poseOptimizationTotalMs << ','
++        << (record.legacyBudgetLogEnabled?1:0) << ','
++        << (record.legacyIterationLogEnabled?1:0);
++    std::array<std::string,4> serializedRounds;
++    for(std::size_t i=0;i<record.rounds.size();++i)
++    {
++        const RealizedWorkRoundRecord &round=record.rounds[i];
++        std::ostringstream row;
++        row << std::setprecision(17)
++            << "REALIZED_LM_WORK_V2," << record.frameId << ',' << record.invocationId
++            << ',' << record.callSource << ',' << i << ',' << (round.executed?1:0)
++            << ',' << round.requested << ',' << (round.initializeOk?1:0)
++            << ',' << round.activeEdges << ',' << round.activeVertices
++            << ',' << round.lm.hessianDimension << ',' << round.optimizeReturn
++            << ',' << round.sparse.outerIterationsStarted
++            << ',' << round.sparse.outerIterationsCompleted
++            << ',' << round.sparse.lastSolverResult
++            << ',' << (round.sparse.capReached?1:0)
++            << ',' << SparseOptimizationStopReasonName(round.sparse.stopReason)
++            << ',' << LmTerminationReasonName(round.lmTermination)
++            << ',' << round.lm.lmTrials << ',' << round.lm.acceptedTrials
++            << ',' << round.lm.rejectedTrials
++            << ',' << round.lm.linearSolveAttempts
++            << ',' << round.lm.linearSolveSuccesses
++            << ',' << round.lm.linearSolveFailures
++            << ',' << round.lm.residualSweeps
++            << ',' << round.lm.residualEdgeEvaluations
++            << ',' << round.lm.jacobianBuilds
++            << ',' << round.lm.jacobianEdgeEvaluations
++            << ',' << round.lm.initialRobustChi2
++            << ',' << round.lm.finalRobustChi2
++            << ',' << round.lm.terminalDamping
++            << ',' << round.lm.objectiveReduction
++            << ',' << round.optimizeMs;
++        serializedRounds[i]=row.str();
++    }
++
++    const bool buffered=!forceSynchronous
++        && CurrentRealizedWorkMode()==RealizedWorkBuffered;
++    if(buffered)
++    {
++        std::shared_ptr<SerializedRealizedWorkPayload> payload(
++            new SerializedRealizedWorkPayload);
++        payload->path=path;
++        payload->frameId=record.frameId;
++        payload->invocationId=record.invocationId;
++        payload->invocationRow=invocationRow.str();
++        payload->roundRows=serializedRounds;
++        payload->producerSerializationMs=std::chrono::duration_cast<
++            std::chrono::duration<double,std::milli> >(
++                std::chrono::steady_clock::now()-writeStart).count();
++        payload->producerEnqueueMs=0.0;
++        payload->queueWaitMs=0.0;
++        payload->queueDepthBefore=payload->queueDepthAfter=0;
++        payload->maxQueueDepthAtEnqueue=0;
++        const std::chrono::steady_clock::time_point enqueueStart=
++            std::chrono::steady_clock::now();
++        return BufferedRealizedWorkLogger::Instance().Enqueue(payload,enqueueStart);
++    }
++
++    static std::mutex mutex;
++    std::unique_lock<std::mutex> lock(mutex);
++    const bool invocationOk=AppendCsvRow(path,kRealizedWorkInvocationHeader,
++                                         invocationRow.str());
++    bool roundsOk=true;
++    const std::string roundsPath=path+".rounds.csv";
++    for(std::size_t i=0;i<serializedRounds.size();++i)
++        roundsOk=AppendCsvRow(roundsPath,kRealizedWorkRoundHeader,
++                              serializedRounds[i]) && roundsOk;
++
++    const double payloadWriteMs=std::chrono::duration_cast<
++        std::chrono::duration<double,std::milli> >(
++            std::chrono::steady_clock::now()-writeStart).count();
++    std::ostringstream ioRow;
++    ioRow << std::setprecision(17) << "REALIZED_LM_WORK_V2," << record.frameId
++          << ',' << record.invocationId << ',' << payloadWriteMs << ','
++          << ((invocationOk&&roundsOk)?1:0);
++    const bool ioOk=AppendCsvRow(
++        path+".io.csv",
++        kRealizedWorkIoHeader,
++        ioRow.str());
++    if(!invocationOk || !roundsOk || !ioOk)
++        std::cerr << "[RealizedWork] failed to append one or more CSV rows for invocation "
++                  << record.invocationId << std::endl;
++    return invocationOk && roundsOk && ioOk;
++}
++
++class ScopedRealizedWorkInvocation
++{
++public:
++    ScopedRealizedWorkInvocation(RealizedWorkInvocationRecord &record,
++                                 const char *path, RealizedWorkMode mode)
++        : record_(record), path_(path), mode_(mode),
++          start_(std::chrono::steady_clock::now()) {}
++    ~ScopedRealizedWorkInvocation()
++    {
++        if(!record_.enabled)
++            return;
++        if(std::uncaught_exception())
++            CopyFixedText(record_.status,sizeof(record_.status),"EXCEPTION");
++        else if(std::strcmp(record_.status,"STARTED")==0)
++            CopyFixedText(record_.status,sizeof(record_.status),"UNFINISHED");
++        record_.poseOptimizationTotalMs=std::chrono::duration_cast<
++            std::chrono::duration<double,std::milli> >(
++                std::chrono::steady_clock::now()-start_).count();
++        if(mode_==RealizedWorkCountOnly)
++        {
++            if(!CountOnlyRealizedWorkStore::Instance().Store(record_,path_))
++                std::cerr << "[RealizedWork] COUNT_ONLY fixed store rejected invocation "
++                          << record_.invocationId << std::endl;
++            return;
++        }
++        (void)LogRealizedWorkInvocation(path_,record_);
++    }
++private:
++    RealizedWorkInvocationRecord &record_;
++    const char *path_;
++    RealizedWorkMode mode_;
++    std::chrono::steady_clock::time_point start_;
++};
++
+ struct PoseMeasurementTrace
+ {
+     bool valid;
+@@ -516,8 +1323,28 @@ void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<M
+  * @param   pFrame Frame
+  * @return  inliers数量
+  */
+-int Optimizer::PoseOptimization(Frame *pFrame)
++int Optimizer::PoseOptimization(Frame *pFrame, const char *callSource)
+ {
++    const char *realizedWorkPathValue=std::getenv("ORB_SLAM2_REALIZED_WORK_LOG");
++    const RealizedWorkMode realizedWorkMode=CurrentRealizedWorkMode();
++    RealizedWorkInvocationRecord realizedWork;
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++    realizedWork.enabled=realizedWorkPathValue && realizedWorkPathValue[0]
++        && realizedWorkMode!=RealizedWorkOff;
++#else
++    realizedWork.enabled=false;
++#endif
++    realizedWork.frameId=pFrame?pFrame->mnId:0;
++    realizedWork.invocationId=NextPoseBudgetInvocation();
++    CopyFixedText(realizedWork.callSource,sizeof(realizedWork.callSource),
++                  callSource&&callSource[0]?callSource:"UNKNOWN");
++    realizedWork.legacyBudgetLogEnabled=
++        std::getenv("ORB_SLAM2_POSE_BUDGET_LOG")!=NULL;
++    realizedWork.legacyIterationLogEnabled=
++        std::getenv("ORB_SLAM2_POSE_ITERATION_LOG")!=NULL;
++    ScopedRealizedWorkInvocation realizedWorkScope(
++        realizedWork,realizedWorkPathValue?realizedWorkPathValue:"",
++        realizedWorkMode);
+     ScopedExperimentTimer poseOptimizationTiming(
+         TimingComponent::PoseOptimization, true);
+     ExperimentTimingAggregate geometryProtectionTiming(
+@@ -534,6 +1361,13 @@ int Optimizer::PoseOptimization(Frame *pFrame)
+ 
+     g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+     optimizer.setAlgorithm(solver);
++#if ORB_SLAM2_REALIZED_WORK_COUNTERS
++    const bool workCountersEnabled=realizedWork.enabled;
++    optimizer.setWorkInstrumentationEnabled(workCountersEnabled);
++    solver->setWorkInstrumentationEnabled(workCountersEnabled);
++#else
++    const bool workCountersEnabled=false;
++#endif
+ 
+     // 输入的帧中,有效的,参与优化过程的2D-3D点对
+     int nInitialCorrespondences=0;
+@@ -550,6 +1384,11 @@ int Optimizer::PoseOptimization(Frame *pFrame)
+ 
+     // Set MapPoint vertices
+     const int N = pFrame->N;
++    std::vector<std::uint64_t> snapshotMapPointIds(static_cast<std::size_t>(N),0);
++    std::vector<double> snapshotBaseInformation(static_cast<std::size_t>(N),1.0);
++    std::vector<double> snapshotTemporalReliability(static_cast<std::size_t>(N),1.0);
++    std::vector<double> snapshotBeliefReliability(static_cast<std::size_t>(N),1.0);
++    std::vector<double> snapshotFinalReliability(static_cast<std::size_t>(N),1.0);
+     const bool measurementLogging =
+         std::getenv("ORB_SLAM2_OPTIMIZER_MEASUREMENT_LOG") != NULL;
+     vector<PoseMeasurementTrace> measurementTraces(
+@@ -600,6 +1439,7 @@ int Optimizer::PoseOptimization(Frame *pFrame)
+         // 如果这个地图点还存在没有被剔除掉
+         if(pMP)
+         {
++            snapshotMapPointIds[static_cast<std::size_t>(i)]=pMP->mnId;
+             const MapPoint::TemporalReliabilityState reliabilityState =
+                 pMP->GetTemporalReliabilityState();
+             const float temporalReliability =
+@@ -679,6 +1519,10 @@ int Optimizer::PoseOptimization(Frame *pFrame)
+                         static_cast<float>(baseInitialChi2), 5.991f);
+                 const float finalReliability =
+                     temporalReliability * effectiveBeliefReliability;
++                snapshotBaseInformation[static_cast<std::size_t>(i)]=invSigma2;
++                snapshotTemporalReliability[static_cast<std::size_t>(i)]=temporalReliability;
++                snapshotBeliefReliability[static_cast<std::size_t>(i)]=effectiveBeliefReliability;
++                snapshotFinalReliability[static_cast<std::size_t>(i)]=finalReliability;
+                 e->setInformation(Eigen::Matrix2d::Identity()*invSigma2*finalReliability);
+                 if(geometryPolicy)
+                     geometryProtectionTiming.Add(
+@@ -783,6 +1627,10 @@ int Optimizer::PoseOptimization(Frame *pFrame)
+                         static_cast<float>(baseInitialChi2), 7.815f);
+                 const float finalReliability =
+                     temporalReliability * effectiveBeliefReliability;
++                snapshotBaseInformation[static_cast<std::size_t>(i)]=invSigma2;
++                snapshotTemporalReliability[static_cast<std::size_t>(i)]=temporalReliability;
++                snapshotBeliefReliability[static_cast<std::size_t>(i)]=effectiveBeliefReliability;
++                snapshotFinalReliability[static_cast<std::size_t>(i)]=finalReliability;
+                 e->setInformation(Eigen::Matrix3d::Identity()*invSigma2*finalReliability);
+                 if(geometryPolicy)
+                     geometryProtectionTiming.Add(
+@@ -867,6 +1715,8 @@ int Optimizer::PoseOptimization(Frame *pFrame)
+             RecoveryControlCandidate &candidate = recoveryCandidates[order[j]];
+             const float finalReliability = candidate.temporalReliability
+                 * candidate.dynamicOnlyReliability;
++            snapshotBeliefReliability[candidate.featureIndex]=candidate.dynamicOnlyReliability;
++            snapshotFinalReliability[candidate.featureIndex]=finalReliability;
+             if(candidate.mono)
+                 candidate.monoEdge->setInformation(
+                     Eigen::Matrix2d::Identity()*candidate.baseInformationScale*finalReliability);
+@@ -889,8 +1739,11 @@ int Optimizer::PoseOptimization(Frame *pFrame)
+     } // 离开临界区
+ 
+     // 如果没有足够的匹配点,那么就只好放弃了
++    realizedWork.initialCorrespondences=nInitialCorrespondences;
+     if(nInitialCorrespondences<3)
+     {
++        CopyFixedText(realizedWork.status,sizeof(realizedWork.status),
++                      "INSUFFICIENT_CORRESPONDENCES");
+         if(measurementLogging)
+             LogPoseMeasurements(pFrame, measurementTraces);
+         return 0;
+@@ -903,15 +1756,41 @@ int Optimizer::PoseOptimization(Frame *pFrame)
+     // 基于卡方检验计算出的阈值（假设测量有一个像素的偏差）
+     const float chi2Mono[4]={5.991,5.991,5.991,5.991};          // 单目
+     const float chi2Stereo[4]={7.815,7.815,7.815, 7.815};       // 双目
+-    const int its[4]={10,10,10,10};// 四次迭代，每次迭代的次数
++    const char *poseBudgetValue=std::getenv("ORB_SLAM2_POSE_BUDGET_MODE");
++    const std::string poseBudgetMode=poseBudgetValue&&poseBudgetValue[0]
++        ?std::string(poseBudgetValue):std::string("A");
++    int selectedIterations=10;
++    if(poseBudgetMode=="B1") selectedIterations=1;
++    else if(poseBudgetMode=="B3") selectedIterations=3;
++    else if(poseBudgetMode=="B4") selectedIterations=4;
++    else if(poseBudgetMode=="B5") selectedIterations=5;
++    else if(poseBudgetMode=="B10" || poseBudgetMode=="A") selectedIterations=10;
++    else
++        throw std::runtime_error(
++            "ORB_SLAM2_POSE_BUDGET_MODE must be A, B1, B3, B4, B5, or B10");
++    const int its[4]={selectedIterations,selectedIterations,
++                      selectedIterations,selectedIterations};
++    int actualIterations[4]={0,0,0,0};
++    const char *snapshotDirectory=std::getenv("ORB_SLAM2_BSRW_SNAPSHOT_DIR");
+ 
+     // bad 的地图点个数
+     int nBad=0;
+     // 一共进行四次优化
+     for(size_t it=0; it<4; it++)
+     {
++        RealizedWorkRoundRecord &workRound=realizedWork.rounds[it];
++        workRound.executed=true;
++        workRound.requested=its[it];
++        ++realizedWork.executedRounds;
+ 
+         vSE3->setEstimate(Converter::toSE3Quat(pFrame->mTcw));
++        ExportPoseOptimizationSnapshot(
++            snapshotDirectory,pFrame,vSE3,vpEdgesMono,vnIndexEdgeMono,
++            vpEdgesStereo,vnIndexEdgeStereo,snapshotMapPointIds,
++            snapshotBaseInformation,snapshotTemporalReliability,
++            snapshotBeliefReliability,snapshotFinalReliability,
++            realizedWork.invocationId,realizedWork.callSource,
++            static_cast<int>(it)+1,its[it],chi2Mono[it],chi2Stereo[it]);
+         if(measurementLogging)
+         {
+             for(size_t i=0; i<vpEdgesMono.size(); ++i)
+@@ -922,9 +1801,25 @@ int Optimizer::PoseOptimization(Frame *pFrame)
+                     vpEdgesStereo[i]->level() == 0 ? 1 : 0;
+         }
+         // 其实就是初始化优化器,这里的参数0就算是不填写,默认也是0,也就是只对level为0的边进行优化
+-        optimizer.initializeOptimization(0);
++        workRound.initializeOk=optimizer.initializeOptimization(0);
++        workRound.activeEdges=static_cast<int>(optimizer.activeEdges().size());
++        workRound.activeVertices=static_cast<int>(optimizer.activeVertices().size());
++        if(workCountersEnabled)
++            solver->resetWorkStatistics();
+         // 开始优化，优化10次
+-        optimizer.optimize(its[it]);
++        const std::chrono::steady_clock::time_point solverCoreStart=
++            std::chrono::steady_clock::now();
++        actualIterations[it]=optimizer.optimize(its[it]);
++        workRound.optimizeMs=std::chrono::duration_cast<
++            std::chrono::duration<double,std::milli> >(
++                std::chrono::steady_clock::now()-solverCoreStart).count();
++        workRound.optimizeReturn=actualIterations[it];
++        if(workCountersEnabled)
++        {
++            workRound.sparse=optimizer.lastOptimizationRunStatistics();
++            workRound.lm=solver->workStatistics();
++            workRound.lmTermination=solver->lastTerminationReason();
++        }
+ 
+         nBad=0;
+         // 优化结束,开始遍历参与优化的每一条误差边(单目)
+@@ -1015,9 +1910,24 @@ int Optimizer::PoseOptimization(Frame *pFrame)
+         } // 对双目误差边的处理
+ 
+         if(optimizer.edges().size()<10)
++        {
++            CopyFixedText(realizedWork.status,sizeof(realizedWork.status),
++                          "GRAPH_EDGE_BREAK");
+             break;
++        }
+     } // 一共要进行四次优化
+ 
++    if(std::strcmp(realizedWork.status,"STARTED")==0)
++    {
++        bool solverFailure=false;
++        for(std::size_t i=0;i<realizedWork.rounds.size();++i)
++            if(realizedWork.rounds[i].executed
++               && realizedWork.rounds[i].optimizeReturn<=0)
++                solverFailure=true;
++        CopyFixedText(realizedWork.status,sizeof(realizedWork.status),
++                      solverFailure?"SOLVER_FAILURE":"OK");
++    }
++
+     // Recover optimized pose and return number of inliers
+     // Step 5 得到优化后的当前帧的位姿
+     g2o::VertexSE3Expmap* vSE3_recov = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(0));
+@@ -1056,6 +1966,52 @@ int Optimizer::PoseOptimization(Frame *pFrame)
+     return nInitialCorrespondences-nBad;
+ }
+ 
++void Optimizer::FlushRealizedWorkLog()
++{
++    const RealizedWorkMode mode=CurrentRealizedWorkMode();
++    if(mode==RealizedWorkBuffered)
++    {
++        BufferedRealizedWorkLogger::Instance().Flush();
++        const char *path=std::getenv("ORB_SLAM2_REALIZED_WORK_LOG");
++        if(path && path[0])
++        {
++            std::ofstream status((std::string(path)+".status.csv").c_str());
++            if(status)
++                status << "schema_version,mode,complete,fixed_store_overflow,"
++                          "path_mismatch,transport_failure\n"
++                       << "REALIZED_LM_WORK_STATUS_V2,BUFFERED,"
++                       << (BufferedRealizedWorkLogger::Instance().HadFailure()?0:1)
++                       << ",0,0,"
++                       << (BufferedRealizedWorkLogger::Instance().HadFailure()?1:0)
++                       << '\n';
++        }
++        return;
++    }
++    if(mode==RealizedWorkCountOnly)
++    {
++        CountOnlyRealizedWorkStore &store=CountOnlyRealizedWorkStore::Instance();
++        bool exportOk=true;
++        const bool structurallyComplete=!store.Overflow() && !store.PathMismatch()
++            && store.Path()[0];
++        if(store.Path()[0])
++        {
++            for(std::size_t i=0;i<store.Size();++i)
++                exportOk=LogRealizedWorkInvocation(
++                    store.Path(),store.Records()[i],true) && exportOk;
++            std::ofstream status((std::string(store.Path())+".status.csv").c_str());
++            if(status)
++                status << "schema_version,mode,complete,fixed_store_overflow,"
++                          "path_mismatch,transport_failure\n"
++                       << "REALIZED_LM_WORK_STATUS_V2,COUNT_ONLY,"
++                       << ((structurallyComplete&&exportOk)?1:0) << ','
++                       << (store.Overflow()?1:0) << ','
++                       << (store.PathMismatch()?1:0) << ','
++                       << (exportOk?0:1) << '\n';
++        }
++        store.Clear();
++    }
++}
++
+ /*
+  * @brief Local Bundle Adjustment
+  *
+diff --git a/src/Tracking.cc b/src/Tracking.cc
+index 1913380..c3413e8 100644
+--- a/src/Tracking.cc
++++ b/src/Tracking.cc
+@@ -1472,7 +1472,7 @@ bool Tracking::TrackReferenceKeyFrame()
+     mCurrentFrame.SetPose(mLastFrame.mTcw); // 用上一次的Tcw设置初值，在PoseOptimization可以收敛快一些
+ 
+     // Step 4:通过优化3D-2D的重投影误差来获得位姿
+-    Optimizer::PoseOptimization(&mCurrentFrame);
++    Optimizer::PoseOptimization(&mCurrentFrame,"TRACK_REFERENCE_KEYFRAME");
+     CullSemanticDynamicMapPoints();
+     if(SemanticConfig::UseObjectSemanticMap())
+         UpdateSemanticObjectMap();
+@@ -1658,7 +1658,7 @@ bool Tracking::TrackWithMotionModel()
+ 
+     // Optimize frame pose with all matches
+     // Step 3：优化当前帧位姿
+-    Optimizer::PoseOptimization(&mCurrentFrame);
++    Optimizer::PoseOptimization(&mCurrentFrame,"TRACK_MOTION_MODEL");
+     CullSemanticDynamicMapPoints();
+     if(SemanticConfig::UseObjectSemanticMap())
+         UpdateSemanticObjectMap();
+@@ -1752,7 +1752,8 @@ bool Tracking::TrackLocalMap()
+     for(int i=0; i<mCurrentFrame.N; ++i)
+         if(mCurrentFrame.mvpMapPoints[i])
+             ++mAblationInitialCorrespondences;
+-    mAblationFinalInliers = Optimizer::PoseOptimization(&mCurrentFrame);
++    mAblationFinalInliers = Optimizer::PoseOptimization(
++        &mCurrentFrame,"TRACK_LOCAL_MAP");
+     CullSemanticDynamicMapPoints();
+     if(SemanticConfig::UseObjectSemanticMap())
+         UpdateSemanticObjectMap();
+@@ -2846,7 +2847,8 @@ bool Tracking::Relocalization()
+                 }
+ 
+                 // 只优化位姿,不优化地图点的坐标，返回的是内点的数量
+-                int nGood = Optimizer::PoseOptimization(&mCurrentFrame);
++                int nGood = Optimizer::PoseOptimization(
++                    &mCurrentFrame,"RELOCALIZATION_PNP");
+ 
+                 // 如果优化之后的内点数目不多，跳过了当前候选关键帧,但是却没有放弃当前帧的重定位
+                 if(nGood<10)
+@@ -2874,7 +2876,8 @@ bool Tracking::Relocalization()
+                     if(nadditional+nGood>=50)
+                     {
+                         // 根据投影匹配的结果，再次采用3D-2D pnp BA优化位姿
+-                        nGood = Optimizer::PoseOptimization(&mCurrentFrame);
++                        nGood = Optimizer::PoseOptimization(
++                            &mCurrentFrame,"RELOCALIZATION_COARSE");
+ 
+                         // If many inliers but still not enough, search by projection again in a narrower window
+                         // the camera has been already optimized with many points
+@@ -2899,7 +2902,8 @@ bool Tracking::Relocalization()
+                             // 如果成功挽救回来，匹配数目达到要求，最后BA优化一下
+                             if(nGood+nadditional>=50)
+                             {
+-                                nGood = Optimizer::PoseOptimization(&mCurrentFrame);
++                                nGood = Optimizer::PoseOptimization(
++                                    &mCurrentFrame,"RELOCALIZATION_FINE");
+                                 //更新地图点
+                                 for(int io =0; io<mCurrentFrame.N; io++)
+                                     if(mCurrentFrame.mvbOutlier[io])

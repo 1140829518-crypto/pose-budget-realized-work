@@ -1,20 +1,19 @@
 # Upload gate resolution
 
-Reviewed: 2026-10-21
+Reviewed: 2026-11-13
 
-The blockers recorded in the repository scaffold were resolved for this
-release candidate as follows:
+Resolved for branch `release/current-experimental-code`:
 
-1. The exact audited candidate package was transferred and verified against
-   its original `SHA256SUMS` before release metadata were changed.
-2. `scripts/reproduce_analysis.py` was reviewed as original standalone analysis
-   code; its exact MIT scope is recorded in `LICENSE_SCOPE.md`.
-3. Every derived data, diagnostic, figure, and documentation path covered by
-   CC BY 4.0 is listed explicitly in `LICENSE_SCOPE.md`.
-4. Original TUM RGB-D files, third-party runtime code and binaries, Paper1
-   materials, credentials, and private paths are absent.
-5. Offline reproduction, deterministic regenerated-output comparison, source
-   provenance hashes, and final-tree security checks passed before upload.
+- the dirty research worktree was not staged, cleaned or overwritten;
+- release work occurred in an independent clone and branch;
+- runtime and replay source identities are documented and hashed;
+- public copies contain no dataset frames, model weights, binaries, secrets or
+  private filesystem paths;
+- licence scopes and upstream notices are explicit;
+- historical, extension and backend batches remain separately labelled;
+- offline reconstruction, Python checks, runtime counter tests, path-portable
+  replay build, model-equivalence check and release-count validation passed.
 
-This resolution does not expand the release into an end-to-end SLAM runtime
-reproduction. Adding runtime code or third-party data requires a new audit.
+Raw snapshots and source datasets remain intentionally blocked from upload.
+Their absence limits end-to-end execution but does not invalidate the packaged
+offline analysis or derived formal result tables.

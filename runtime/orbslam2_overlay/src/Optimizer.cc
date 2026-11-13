@@ -1,0 +1,3041 @@
+/**
+ * @file Optimizer.cc
+ * @author guoqing (1337841346@qq.com)
+ * @brief 优化器，所有的优化函数的实现
+ * @version 0.1
+ * @date 2019-05-22
+ * 
+ * @copyright Copyright (c) 2019
+ * 
+ */
+
+/**
+* This file is part of ORB-SLAM2.
+*
+* Copyright (C) 2014-2016 Raúl Mur-Artal <raulmur at unizar dot es> (University of Zaragoza)
+* For more information see <https://github.com/raulmur/ORB_SLAM2>
+*
+* ORB-SLAM2 is free software: you can redistribute it and/or modify
+* it under the terms of the GNU General Public License as published by
+* the Free Software Foundation, either version 3 of the License, or
+* (at your option) any later version.
+*
+* ORB-SLAM2 is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+* GNU General Public License for more details.
+*
+* You should have received a copy of the GNU General Public License
+* along with ORB-SLAM2. If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#include "Optimizer.h"
+#include "BSRWSnapshot.h"
+
+#include "Thirdparty/g2o/g2o/core/block_solver.h"
+#include "Thirdparty/g2o/g2o/core/optimization_algorithm_levenberg.h"
+#include "Thirdparty/g2o/g2o/core/robust_kernel_impl.h"
+#include "Thirdparty/g2o/g2o/solvers/linear_solver_eigen.h"
+#include "Thirdparty/g2o/g2o/solvers/linear_solver_dense.h"
+#include "Thirdparty/g2o/g2o/types/types_six_dof_expmap.h"
+#include "Thirdparty/g2o/g2o/types/types_seven_dof_expmap.h"
+
+#include<Eigen/StdVector>
+
+#include "Converter.h"
+#include "SemanticConfig.h"
+#include "ExperimentTiming.h"
+
+#include<mutex>
+#include<iostream>
+#include<fstream>
+#include<iomanip>
+#include<limits>
+#include<algorithm>
+#include<random>
+#include<cstdint>
+#include<cstdlib>
+#include<string>
+#include<array>
+#include<sstream>
+#include<exception>
+#include<condition_variable>
+#include<deque>
+#include<map>
+#include<memory>
+#include<thread>
+#include<cstring>
+#include<cstdio>
+#include<cctype>
+
+namespace ORB_SLAM2
+{
+
+namespace
+{
+std::string SnapshotSafeToken(const std::string& value)
+{
+    std::string result=value.empty()?"UNSPECIFIED":value;
+    for(std::size_t i=0;i<result.size();++i)
+        if(!std::isalnum(static_cast<unsigned char>(result[i]))
+           && result[i]!='-' && result[i]!='_')
+            result[i]='_';
+    return result;
+}
+
+std::size_t SnapshotActiveEdgeCount(
+    const std::vector<g2o::EdgeSE3ProjectXYZOnlyPose*>& mono,
+    const std::vector<g2o::EdgeStereoSE3ProjectXYZOnlyPose*>& stereo)
+{
+    std::size_t count=0;
+    for(std::size_t i=0;i<mono.size();++i)
+        if(mono[i]->level()==0) ++count;
+    for(std::size_t i=0;i<stereo.size();++i)
+        if(stereo[i]->level()==0) ++count;
+    return count;
+}
+
+void ExportPoseOptimizationSnapshot(
+    const char *directory,
+    const Frame *frame,
+    const g2o::VertexSE3Expmap *vertex,
+    const std::vector<g2o::EdgeSE3ProjectXYZOnlyPose*>& mono,
+    const std::vector<std::size_t>& monoIndices,
+    const std::vector<g2o::EdgeStereoSE3ProjectXYZOnlyPose*>& stereo,
+    const std::vector<std::size_t>& stereoIndices,
+    const std::vector<std::uint64_t>& mapPointIds,
+    const std::vector<double>& baseInformation,
+    const std::vector<double>& temporalReliability,
+    const std::vector<double>& beliefReliability,
+    const std::vector<double>& finalReliability,
+    const std::uint64_t invocationId,
+    const char *callSource,
+    const int roundId,
+    const int budget,
+    const double monoThreshold,
+    const double stereoThreshold)
+{
+    if(!directory || !directory[0]) return;
+    const std::size_t activeBefore=SnapshotActiveEdgeCount(mono,stereo);
+    BSRW::Snapshot snapshot;
+    const char *runValue=std::getenv("ORB_SLAM2_BSRW_SOURCE_RUN_ID");
+    snapshot.source_run_id=runValue&&runValue[0]?runValue:"UNSPECIFIED";
+    snapshot.frame_id=frame?frame->mnId:0;
+    snapshot.caller_id=std::string(callSource&&callSource[0]?callSource:"UNKNOWN")
+        +"#"+std::to_string(invocationId);
+    snapshot.round_id=roundId;
+    snapshot.budget=budget;
+    snapshot.mono_outlier_threshold=monoThreshold;
+    snapshot.stereo_outlier_threshold=stereoThreshold;
+    snapshot.orb_slam2_head="7a9200ba9a1ad3006a9fbad02163d31437135371";
+    snapshot.g2o_version="ORB-SLAM2 bundled g2o + realized-work counters";
+    snapshot.ceres_version="2.2.0";
+    const std::string id=SnapshotSafeToken(snapshot.source_run_id)
+        +"_f"+std::to_string(snapshot.frame_id)
+        +"_c"+std::to_string(invocationId)
+        +"_r"+std::to_string(roundId);
+    snapshot.snapshot_id=id;
+    const g2o::SE3Quat estimate=vertex->estimate();
+    snapshot.initial_pose.translation=estimate.translation();
+    snapshot.initial_pose.quaternion=estimate.rotation();
+    snapshot.initial_pose.quaternion.normalize();
+    snapshot.camera.fx=frame->fx;
+    snapshot.camera.fy=frame->fy;
+    snapshot.camera.cx=frame->cx;
+    snapshot.camera.cy=frame->cy;
+    snapshot.camera.bf=frame->mbf;
+
+    for(std::size_t edgeIndex=0;edgeIndex<mono.size();++edgeIndex)
+    {
+        const std::size_t feature=monoIndices[edgeIndex];
+        const g2o::EdgeSE3ProjectXYZOnlyPose *edge=mono[edgeIndex];
+        BSRW::Observation observation;
+        observation.observation_id=feature;
+        observation.map_point_id=mapPointIds[feature];
+        observation.type="mono";
+        observation.point_w=edge->Xw;
+        observation.dimension=2;
+        observation.measurement.push_back(edge->measurement()[0]);
+        observation.measurement.push_back(edge->measurement()[1]);
+        observation.information.topLeftCorner<2,2>()=edge->information();
+        observation.base_information_scale=baseInformation[feature];
+        observation.temporal_reliability=temporalReliability[feature];
+        observation.belief_reliability=beliefReliability[feature];
+        observation.final_reliability=finalReliability[feature];
+        observation.active=edge->level()==0;
+        observation.use_huber=edge->robustKernel()!=NULL;
+        observation.huber_delta=observation.use_huber
+            ?edge->robustKernel()->delta():std::sqrt(monoThreshold);
+        snapshot.observations.push_back(observation);
+    }
+    for(std::size_t edgeIndex=0;edgeIndex<stereo.size();++edgeIndex)
+    {
+        const std::size_t feature=stereoIndices[edgeIndex];
+        const g2o::EdgeStereoSE3ProjectXYZOnlyPose *edge=stereo[edgeIndex];
+        BSRW::Observation observation;
+        observation.observation_id=feature;
+        observation.map_point_id=mapPointIds[feature];
+        observation.type="stereo_rgbd";
+        observation.point_w=edge->Xw;
+        observation.dimension=3;
+        for(int i=0;i<3;++i) observation.measurement.push_back(edge->measurement()[i]);
+        observation.information=edge->information();
+        observation.base_information_scale=baseInformation[feature];
+        observation.temporal_reliability=temporalReliability[feature];
+        observation.belief_reliability=beliefReliability[feature];
+        observation.final_reliability=finalReliability[feature];
+        observation.active=edge->level()==0;
+        observation.use_huber=edge->robustKernel()!=NULL;
+        observation.huber_delta=observation.use_huber
+            ?edge->robustKernel()->delta():std::sqrt(stereoThreshold);
+        snapshot.observations.push_back(observation);
+    }
+    std::sort(snapshot.observations.begin(),snapshot.observations.end(),
+        [](const BSRW::Observation& first,const BSRW::Observation& second)
+        { return first.observation_id<second.observation_id; });
+    const std::string path=std::string(directory)
+        +(directory[std::strlen(directory)-1]=='/'?"":"/")
+        +"snapshot_"+id+".json";
+    std::string inputHash;
+    std::string error;
+    if(!BSRW::WriteSnapshot(snapshot,path,&inputHash,&error))
+        throw std::runtime_error("BSRW snapshot export failed: "+error);
+    const std::size_t activeAfter=SnapshotActiveEdgeCount(mono,stereo);
+    if(activeBefore!=activeAfter)
+        throw std::runtime_error("BSRW snapshot export changed active observations");
+    std::cout<<"[BSRWSnapshot] path="<<path
+             <<" active="<<activeAfter
+             <<" input_sha256="<<inputHash<<std::endl;
+}
+
+// Selectively migrated from the frozen realized-work implementation.  RWBC,
+// observation-identity, and V5 semantic-motion code are intentionally absent.
+std::uint64_t NextPoseBudgetInvocation()
+{
+    static std::mutex mutex;
+    static std::uint64_t invocation = 0;
+    std::unique_lock<std::mutex> lock(mutex);
+    return ++invocation;
+}
+
+const char *SparseOptimizationStopReasonName(
+    const g2o::SparseOptimizer::OptimizationStopReason reason)
+{
+    switch(reason)
+    {
+    case g2o::SparseOptimizer::OptimizationRequestedMaximum:
+        return "REQUESTED_MAXIMUM";
+    case g2o::SparseOptimizer::OptimizationAlgorithmTerminate:
+        return "ALGORITHM_TERMINATE";
+    case g2o::SparseOptimizer::OptimizationAlgorithmFail:
+        return "ALGORITHM_FAIL";
+    case g2o::SparseOptimizer::OptimizationExternalStop:
+        return "EXTERNAL_STOP";
+    case g2o::SparseOptimizer::OptimizationEmptyActiveGraph:
+        return "EMPTY_ACTIVE_GRAPH";
+    case g2o::SparseOptimizer::OptimizationInitializationFailure:
+        return "INITIALIZATION_FAILURE";
+    case g2o::SparseOptimizer::OptimizationZeroRequestedIterations:
+        return "ZERO_REQUESTED_ITERATIONS";
+    case g2o::SparseOptimizer::OptimizationOtherStop:
+        return "OTHER_STOP";
+    default:
+        return "NOT_RUN";
+    }
+}
+
+const char *LmTerminationReasonName(
+    const g2o::OptimizationAlgorithmLevenberg::TerminationReason reason)
+{
+    switch(reason)
+    {
+    case g2o::OptimizationAlgorithmLevenberg::TerminationMaxTrials:
+        return "LM_MAX_TRIALS";
+    case g2o::OptimizationAlgorithmLevenberg::TerminationZeroGain:
+        return "LM_ZERO_GAIN";
+    case g2o::OptimizationAlgorithmLevenberg::TerminationSmallImprovement:
+        return "LM_SMALL_IMPROVEMENT";
+    default:
+        return "NONE";
+    }
+}
+
+struct RealizedWorkRoundRecord
+{
+    bool executed;
+    int requested;
+    bool initializeOk;
+    int activeEdges;
+    int activeVertices;
+    int optimizeReturn;
+    double optimizeMs;
+    g2o::SparseOptimizer::OptimizationRunStatistics sparse;
+    g2o::OptimizationAlgorithmLevenberg::WorkStatistics lm;
+    g2o::OptimizationAlgorithmLevenberg::TerminationReason lmTermination;
+
+    RealizedWorkRoundRecord()
+        : executed(false), requested(0), initializeOk(false), activeEdges(0),
+          activeVertices(0), optimizeReturn(0), optimizeMs(0.0),
+          lmTermination(g2o::OptimizationAlgorithmLevenberg::TerminationNone) {}
+};
+
+struct RealizedWorkInvocationRecord
+{
+    bool enabled;
+    unsigned long frameId;
+    std::uint64_t invocationId;
+    char callSource[48];
+    char status[48];
+    int initialCorrespondences;
+    int executedRounds;
+    double poseOptimizationTotalMs;
+    bool legacyBudgetLogEnabled;
+    bool legacyIterationLogEnabled;
+    std::array<RealizedWorkRoundRecord,4> rounds;
+
+    RealizedWorkInvocationRecord()
+        : enabled(false), frameId(0), invocationId(0),
+          initialCorrespondences(0), executedRounds(0),
+          poseOptimizationTotalMs(0.0), legacyBudgetLogEnabled(false),
+          legacyIterationLogEnabled(false)
+    {
+        std::strcpy(callSource,"UNKNOWN");
+        std::strcpy(status,"STARTED");
+    }
+};
+
+void CopyFixedText(char *destination, const std::size_t capacity,
+                   const char *source)
+{
+    if(!capacity)
+        return;
+    const char *safe=source?source:"";
+    std::strncpy(destination,safe,capacity-1);
+    destination[capacity-1]='\0';
+}
+
+enum RealizedWorkMode
+{
+    RealizedWorkOff=0,
+    RealizedWorkCountOnly,
+    RealizedWorkBuffered,
+    RealizedWorkSynchronous
+};
+
+RealizedWorkMode CurrentRealizedWorkMode()
+{
+    const char *mode=std::getenv("ORB_SLAM2_REALIZED_WORK_MODE");
+    if(!mode || !mode[0])
+        mode=std::getenv("ORB_SLAM2_REALIZED_WORK_LOG_MODE");
+    if(!mode || !mode[0] || std::strcmp(mode,"OFF")==0)
+        return RealizedWorkOff;
+    if(std::strcmp(mode,"COUNT_ONLY")==0)
+        return RealizedWorkCountOnly;
+    if(std::strcmp(mode,"BUFFERED")==0)
+        return RealizedWorkBuffered;
+    if(std::strcmp(mode,"SYNC")==0)
+        return RealizedWorkSynchronous;
+    return RealizedWorkOff;
+}
+
+class CountOnlyRealizedWorkStore
+{
+public:
+    static const std::size_t kCapacity=1024;
+
+    static CountOnlyRealizedWorkStore &Instance()
+    {
+        static CountOnlyRealizedWorkStore store;
+        return store;
+    }
+
+    bool Store(const RealizedWorkInvocationRecord &record, const char *path)
+    {
+        if(size_>=kCapacity)
+        {
+            overflow_=true;
+            return false;
+        }
+        if(size_==0)
+            CopyFixedText(path_,sizeof(path_),path);
+        else if(std::strncmp(path_,path?path:"",sizeof(path_))!=0)
+        {
+            pathMismatch_=true;
+            return false;
+        }
+        records_[size_++]=record;
+        return true;
+    }
+
+    const RealizedWorkInvocationRecord *Records() const { return records_; }
+    std::size_t Size() const { return size_; }
+    const char *Path() const { return path_; }
+    bool Overflow() const { return overflow_; }
+    bool PathMismatch() const { return pathMismatch_; }
+    void Clear()
+    {
+        size_=0;
+        overflow_=false;
+        pathMismatch_=false;
+        path_[0]='\0';
+    }
+
+private:
+    CountOnlyRealizedWorkStore()
+        : size_(0), overflow_(false), pathMismatch_(false)
+    { path_[0]='\0'; }
+    RealizedWorkInvocationRecord records_[kCapacity];
+    std::size_t size_;
+    bool overflow_;
+    bool pathMismatch_;
+    char path_[4096];
+};
+bool AppendCsvRow(const std::string &path, const char *header,
+                  const std::string &row)
+{
+    std::ifstream check(path.c_str());
+    const bool writeHeader = !check.good()
+        || check.peek() == std::ifstream::traits_type::eof();
+    check.close();
+    std::ofstream output(path.c_str(), std::ios::app);
+    if(!output)
+        return false;
+    if(writeHeader)
+        output << header << '\n';
+    output << row << '\n';
+    return output.good();
+}
+
+const char *kRealizedWorkInvocationHeader =
+    "schema_version,frame_id,optimizer_invocation_id,call_source,status,"
+    "initial_correspondences,executed_rounds,total_requested_outer_iterations,"
+    "total_outer_started,total_outer_completed,total_lm_trials,"
+    "total_accepted_trials,total_rejected_trials,total_linear_solve_attempts,"
+    "total_linear_solve_successes,total_linear_solve_failures,"
+    "total_residual_sweeps,total_residual_edge_evaluations,"
+    "total_jacobian_builds,total_jacobian_edge_evaluations,"
+    "total_solver_core_ms,pose_optimization_total_ms,"
+    "legacy_budget_log_enabled,legacy_iteration_log_enabled";
+
+const char *kRealizedWorkRoundHeader =
+    "schema_version,frame_id,optimizer_invocation_id,call_source,round,"
+    "executed,requested,initialize_ok,active_edges,active_vertices,"
+    "hessian_dimension,optimize_return,outer_started,outer_completed,"
+    "last_solver_result,cap_reached,sparse_stop_reason,lm_stop_reason,"
+    "lm_trials,accepted_trials,rejected_trials,linear_solve_attempts,"
+    "linear_solve_successes,linear_solve_failures,residual_sweeps,"
+    "residual_edge_evaluations,jacobian_builds,jacobian_edge_evaluations,"
+    "initial_robust_chi2,final_robust_chi2,terminal_damping,objective_reduction,"
+    "optimize_ms";
+
+const char *kRealizedWorkIoHeader =
+    "schema_version,frame_id,optimizer_invocation_id,payload_write_ms,write_ok";
+
+struct SerializedRealizedWorkPayload
+{
+    std::string path;
+    unsigned long frameId;
+    std::uint64_t invocationId;
+    std::string invocationRow;
+    std::array<std::string,4> roundRows;
+    double producerSerializationMs;
+    double producerEnqueueMs;
+    double queueWaitMs;
+    std::size_t queueDepthBefore;
+    std::size_t queueDepthAfter;
+    std::size_t maxQueueDepthAtEnqueue;
+};
+
+class BufferedRealizedWorkLogger
+{
+public:
+    static BufferedRealizedWorkLogger &Instance()
+    {
+        static BufferedRealizedWorkLogger logger;
+        return logger;
+    }
+
+    bool Enqueue(const std::shared_ptr<SerializedRealizedWorkPayload> &payload,
+                 const std::chrono::steady_clock::time_point &producerStart)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        spaceAvailable_.wait(lock,[this] { return queue_.size()<kCapacity || stopping_; });
+        if(stopping_)
+        {
+            failure_=true;
+            return false;
+        }
+        payload->queueWaitMs=std::chrono::duration_cast<
+            std::chrono::duration<double,std::milli> >(
+                std::chrono::steady_clock::now()-producerStart).count();
+        payload->queueDepthBefore=queue_.size();
+        queue_.push_back(QueueItem(payload,0));
+        payload->queueDepthAfter=queue_.size();
+        maxQueueDepth_=std::max(maxQueueDepth_,queue_.size());
+        payload->maxQueueDepthAtEnqueue=maxQueueDepth_;
+        payload->producerEnqueueMs=std::chrono::duration_cast<
+            std::chrono::duration<double,std::milli> >(
+                std::chrono::steady_clock::now()-producerStart).count();
+        workAvailable_.notify_one();
+        return true;
+    }
+
+    void Flush()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        const std::uint64_t fence=++nextFence_;
+        queue_.push_back(QueueItem(std::shared_ptr<SerializedRealizedWorkPayload>(),fence));
+        workAvailable_.notify_one();
+        fenceCompleted_.wait(lock,[this,fence] { return completedFence_>=fence; });
+    }
+
+    bool HadFailure()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return failure_;
+    }
+
+private:
+    struct QueueItem
+    {
+        std::shared_ptr<SerializedRealizedWorkPayload> payload;
+        std::uint64_t fence;
+        QueueItem(const std::shared_ptr<SerializedRealizedWorkPayload> &p,
+                  std::uint64_t f) : payload(p), fence(f) {}
+    };
+
+    struct StreamSet
+    {
+        std::ofstream invocation;
+        std::ofstream rounds;
+        std::ofstream io;
+        std::ofstream transport;
+        bool openOk;
+        StreamSet() : openOk(false) {}
+    };
+
+    static const std::size_t kCapacity=256;
+    static const std::size_t kFlushBatch=64;
+
+    BufferedRealizedWorkLogger()
+        : stopping_(false), nextFence_(0), completedFence_(0),
+          writesSinceFlush_(0), failure_(false),
+          worker_(&BufferedRealizedWorkLogger::Worker,this) {}
+
+    ~BufferedRealizedWorkLogger()
+    {
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            stopping_=true;
+            workAvailable_.notify_one();
+            spaceAvailable_.notify_all();
+        }
+        worker_.join();
+    }
+
+    BufferedRealizedWorkLogger(const BufferedRealizedWorkLogger&);
+    BufferedRealizedWorkLogger& operator=(const BufferedRealizedWorkLogger&);
+
+    static bool EmptyOrMissing(const std::string &path)
+    {
+        std::ifstream input(path.c_str());
+        return !input.good() || input.peek()==std::ifstream::traits_type::eof();
+    }
+
+    StreamSet &Streams(const std::string &path)
+    {
+        std::map<std::string,std::unique_ptr<StreamSet> >::iterator found=streams_.find(path);
+        if(found!=streams_.end())
+            return *found->second;
+        std::unique_ptr<StreamSet> streams(new StreamSet);
+        const bool invocationHeader=EmptyOrMissing(path);
+        const bool roundHeader=EmptyOrMissing(path+".rounds.csv");
+        const bool ioHeader=EmptyOrMissing(path+".io.csv");
+        const bool transportHeader=EmptyOrMissing(path+".transport.csv");
+        streams->invocation.open(path.c_str(),std::ios::app);
+        streams->rounds.open((path+".rounds.csv").c_str(),std::ios::app);
+        streams->io.open((path+".io.csv").c_str(),std::ios::app);
+        streams->transport.open((path+".transport.csv").c_str(),std::ios::app);
+        streams->openOk=streams->invocation.good() && streams->rounds.good()
+            && streams->io.good() && streams->transport.good();
+        if(streams->openOk)
+        {
+            if(invocationHeader) streams->invocation << kRealizedWorkInvocationHeader << '\n';
+            if(roundHeader) streams->rounds << kRealizedWorkRoundHeader << '\n';
+            if(ioHeader) streams->io << kRealizedWorkIoHeader << '\n';
+            if(transportHeader)
+                streams->transport << "schema_version,frame_id,optimizer_invocation_id,"
+                    "logger_mode,producer_serialization_ms,producer_enqueue_ms,"
+                    "queue_wait_ms,queue_depth_before,queue_depth_after,"
+                    "max_queue_depth,consumer_write_ms,write_ok\n";
+        }
+        StreamSet &answer=*streams;
+        streams_[path]=std::move(streams);
+        return answer;
+    }
+
+    bool FlushStreams()
+    {
+        bool ok=true;
+        for(std::map<std::string,std::unique_ptr<StreamSet> >::iterator it=streams_.begin();
+            it!=streams_.end();++it)
+        {
+            StreamSet &s=*it->second;
+            s.invocation.flush(); s.rounds.flush(); s.io.flush(); s.transport.flush();
+            ok=s.invocation.good() && s.rounds.good() && s.io.good()
+                && s.transport.good() && ok;
+        }
+        writesSinceFlush_=0;
+        return ok;
+    }
+
+    void Write(const std::shared_ptr<SerializedRealizedWorkPayload> &payload)
+    {
+        const std::chrono::steady_clock::time_point writeStart=
+            std::chrono::steady_clock::now();
+        StreamSet &s=Streams(payload->path);
+        bool ok=s.openOk;
+        if(ok)
+        {
+            s.invocation << payload->invocationRow << '\n';
+            for(std::size_t i=0;i<payload->roundRows.size();++i)
+                s.rounds << payload->roundRows[i] << '\n';
+            ok=s.invocation.good() && s.rounds.good();
+        }
+        const double consumerWriteMs=std::chrono::duration_cast<
+            std::chrono::duration<double,std::milli> >(
+                std::chrono::steady_clock::now()-writeStart).count();
+        if(s.openOk)
+        {
+            s.io << std::setprecision(17) << "REALIZED_LM_WORK_V2,"
+                 << payload->frameId << ',' << payload->invocationId << ','
+                 << consumerWriteMs << ',' << (ok?1:0) << '\n';
+            s.transport << std::setprecision(17) << "REALIZED_LM_WORK_TRANSPORT_V1,"
+                        << payload->frameId << ',' << payload->invocationId
+                        << ",BUFFERED," << payload->producerSerializationMs << ','
+                        << payload->producerEnqueueMs << ',' << payload->queueWaitMs
+                        << ',' << payload->queueDepthBefore << ','
+                        << payload->queueDepthAfter << ','
+                        << payload->maxQueueDepthAtEnqueue << ','
+                        << consumerWriteMs << ',' << (ok?1:0) << '\n';
+            ok=s.io.good() && s.transport.good() && ok;
+        }
+        if(!ok)
+        {
+            failure_=true;
+            std::cerr << "[RealizedWork] buffered write failure for invocation "
+                      << payload->invocationId << std::endl;
+        }
+        ++writesSinceFlush_;
+        if(writesSinceFlush_>=kFlushBatch && !FlushStreams())
+        {
+            failure_=true;
+            std::cerr << "[RealizedWork] buffered flush failure" << std::endl;
+        }
+    }
+
+    void Worker()
+    {
+        for(;;)
+        {
+            QueueItem item(std::shared_ptr<SerializedRealizedWorkPayload>(),0);
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                if(queue_.empty() && !stopping_)
+                {
+                    if(writesSinceFlush_)
+                        workAvailable_.wait_for(lock,std::chrono::milliseconds(250));
+                    else
+                        workAvailable_.wait(lock);
+                }
+                if(queue_.empty())
+                {
+                    if(stopping_)
+                        break;
+                    lock.unlock();
+                    if(writesSinceFlush_ && !FlushStreams())
+                    {
+                        failure_=true;
+                        std::cerr << "[RealizedWork] periodic flush failure" << std::endl;
+                    }
+                    continue;
+                }
+                item=queue_.front();
+                queue_.pop_front();
+                spaceAvailable_.notify_one();
+            }
+            if(item.payload)
+                Write(item.payload);
+            else
+            {
+                const bool ok=FlushStreams();
+                if(!ok)
+                {
+                    failure_=true;
+                    std::cerr << "[RealizedWork] explicit flush failure" << std::endl;
+                }
+                std::unique_lock<std::mutex> lock(mutex_);
+                completedFence_=std::max(completedFence_,item.fence);
+                fenceCompleted_.notify_all();
+            }
+        }
+        if(!FlushStreams())
+        {
+            failure_=true;
+            std::cerr << "[RealizedWork] shutdown flush failure" << std::endl;
+        }
+    }
+
+    std::mutex mutex_;
+    std::condition_variable workAvailable_;
+    std::condition_variable spaceAvailable_;
+    std::condition_variable fenceCompleted_;
+    std::deque<QueueItem> queue_;
+    bool stopping_;
+    std::uint64_t nextFence_;
+    std::uint64_t completedFence_;
+    std::size_t writesSinceFlush_;
+    std::size_t maxQueueDepth_=0;
+    bool failure_;
+    std::map<std::string,std::unique_ptr<StreamSet> > streams_;
+    std::thread worker_;
+};
+
+bool LogRealizedWorkInvocation(const std::string &path,
+                               const RealizedWorkInvocationRecord &record,
+                               const bool forceSynchronous=false)
+{
+    const std::chrono::steady_clock::time_point writeStart =
+        std::chrono::steady_clock::now();
+
+    int totalRequested=0, totalOuterStarted=0, totalOuterCompleted=0;
+    int totalLmTrials=0, totalAccepted=0, totalRejected=0;
+    int totalSolveAttempts=0, totalSolveSuccesses=0, totalSolveFailures=0;
+    int totalResidualSweeps=0, totalJacobianBuilds=0;
+    std::size_t totalResidualEdges=0, totalJacobianEdges=0;
+    double totalSolverCoreMs=0.0;
+    for(std::size_t i=0;i<record.rounds.size();++i)
+    {
+        const RealizedWorkRoundRecord &round=record.rounds[i];
+        if(!round.executed)
+            continue;
+        totalRequested+=round.requested;
+        totalOuterStarted+=round.sparse.outerIterationsStarted;
+        totalOuterCompleted+=round.sparse.outerIterationsCompleted;
+        totalLmTrials+=round.lm.lmTrials;
+        totalAccepted+=round.lm.acceptedTrials;
+        totalRejected+=round.lm.rejectedTrials;
+        totalSolveAttempts+=round.lm.linearSolveAttempts;
+        totalSolveSuccesses+=round.lm.linearSolveSuccesses;
+        totalSolveFailures+=round.lm.linearSolveFailures;
+        totalResidualSweeps+=round.lm.residualSweeps;
+        totalResidualEdges+=round.lm.residualEdgeEvaluations;
+        totalJacobianBuilds+=round.lm.jacobianBuilds;
+        totalJacobianEdges+=round.lm.jacobianEdgeEvaluations;
+        totalSolverCoreMs+=round.optimizeMs;
+    }
+
+    std::ostringstream invocationRow;
+    invocationRow << std::setprecision(17)
+        << "REALIZED_LM_WORK_V2," << record.frameId << ',' << record.invocationId
+        << ',' << record.callSource << ',' << record.status << ','
+        << record.initialCorrespondences << ',' << record.executedRounds << ','
+        << totalRequested << ',' << totalOuterStarted << ',' << totalOuterCompleted << ','
+        << totalLmTrials << ',' << totalAccepted << ',' << totalRejected << ','
+        << totalSolveAttempts << ',' << totalSolveSuccesses << ','
+        << totalSolveFailures << ',' << totalResidualSweeps << ','
+        << totalResidualEdges << ',' << totalJacobianBuilds << ','
+        << totalJacobianEdges << ',' << totalSolverCoreMs << ','
+        << record.poseOptimizationTotalMs << ','
+        << (record.legacyBudgetLogEnabled?1:0) << ','
+        << (record.legacyIterationLogEnabled?1:0);
+    std::array<std::string,4> serializedRounds;
+    for(std::size_t i=0;i<record.rounds.size();++i)
+    {
+        const RealizedWorkRoundRecord &round=record.rounds[i];
+        std::ostringstream row;
+        row << std::setprecision(17)
+            << "REALIZED_LM_WORK_V2," << record.frameId << ',' << record.invocationId
+            << ',' << record.callSource << ',' << i << ',' << (round.executed?1:0)
+            << ',' << round.requested << ',' << (round.initializeOk?1:0)
+            << ',' << round.activeEdges << ',' << round.activeVertices
+            << ',' << round.lm.hessianDimension << ',' << round.optimizeReturn
+            << ',' << round.sparse.outerIterationsStarted
+            << ',' << round.sparse.outerIterationsCompleted
+            << ',' << round.sparse.lastSolverResult
+            << ',' << (round.sparse.capReached?1:0)
+            << ',' << SparseOptimizationStopReasonName(round.sparse.stopReason)
+            << ',' << LmTerminationReasonName(round.lmTermination)
+            << ',' << round.lm.lmTrials << ',' << round.lm.acceptedTrials
+            << ',' << round.lm.rejectedTrials
+            << ',' << round.lm.linearSolveAttempts
+            << ',' << round.lm.linearSolveSuccesses
+            << ',' << round.lm.linearSolveFailures
+            << ',' << round.lm.residualSweeps
+            << ',' << round.lm.residualEdgeEvaluations
+            << ',' << round.lm.jacobianBuilds
+            << ',' << round.lm.jacobianEdgeEvaluations
+            << ',' << round.lm.initialRobustChi2
+            << ',' << round.lm.finalRobustChi2
+            << ',' << round.lm.terminalDamping
+            << ',' << round.lm.objectiveReduction
+            << ',' << round.optimizeMs;
+        serializedRounds[i]=row.str();
+    }
+
+    const bool buffered=!forceSynchronous
+        && CurrentRealizedWorkMode()==RealizedWorkBuffered;
+    if(buffered)
+    {
+        std::shared_ptr<SerializedRealizedWorkPayload> payload(
+            new SerializedRealizedWorkPayload);
+        payload->path=path;
+        payload->frameId=record.frameId;
+        payload->invocationId=record.invocationId;
+        payload->invocationRow=invocationRow.str();
+        payload->roundRows=serializedRounds;
+        payload->producerSerializationMs=std::chrono::duration_cast<
+            std::chrono::duration<double,std::milli> >(
+                std::chrono::steady_clock::now()-writeStart).count();
+        payload->producerEnqueueMs=0.0;
+        payload->queueWaitMs=0.0;
+        payload->queueDepthBefore=payload->queueDepthAfter=0;
+        payload->maxQueueDepthAtEnqueue=0;
+        const std::chrono::steady_clock::time_point enqueueStart=
+            std::chrono::steady_clock::now();
+        return BufferedRealizedWorkLogger::Instance().Enqueue(payload,enqueueStart);
+    }
+
+    static std::mutex mutex;
+    std::unique_lock<std::mutex> lock(mutex);
+    const bool invocationOk=AppendCsvRow(path,kRealizedWorkInvocationHeader,
+                                         invocationRow.str());
+    bool roundsOk=true;
+    const std::string roundsPath=path+".rounds.csv";
+    for(std::size_t i=0;i<serializedRounds.size();++i)
+        roundsOk=AppendCsvRow(roundsPath,kRealizedWorkRoundHeader,
+                              serializedRounds[i]) && roundsOk;
+
+    const double payloadWriteMs=std::chrono::duration_cast<
+        std::chrono::duration<double,std::milli> >(
+            std::chrono::steady_clock::now()-writeStart).count();
+    std::ostringstream ioRow;
+    ioRow << std::setprecision(17) << "REALIZED_LM_WORK_V2," << record.frameId
+          << ',' << record.invocationId << ',' << payloadWriteMs << ','
+          << ((invocationOk&&roundsOk)?1:0);
+    const bool ioOk=AppendCsvRow(
+        path+".io.csv",
+        kRealizedWorkIoHeader,
+        ioRow.str());
+    if(!invocationOk || !roundsOk || !ioOk)
+        std::cerr << "[RealizedWork] failed to append one or more CSV rows for invocation "
+                  << record.invocationId << std::endl;
+    return invocationOk && roundsOk && ioOk;
+}
+
+class ScopedRealizedWorkInvocation
+{
+public:
+    ScopedRealizedWorkInvocation(RealizedWorkInvocationRecord &record,
+                                 const char *path, RealizedWorkMode mode)
+        : record_(record), path_(path), mode_(mode),
+          start_(std::chrono::steady_clock::now()) {}
+    ~ScopedRealizedWorkInvocation()
+    {
+        if(!record_.enabled)
+            return;
+        if(std::uncaught_exception())
+            CopyFixedText(record_.status,sizeof(record_.status),"EXCEPTION");
+        else if(std::strcmp(record_.status,"STARTED")==0)
+            CopyFixedText(record_.status,sizeof(record_.status),"UNFINISHED");
+        record_.poseOptimizationTotalMs=std::chrono::duration_cast<
+            std::chrono::duration<double,std::milli> >(
+                std::chrono::steady_clock::now()-start_).count();
+        if(mode_==RealizedWorkCountOnly)
+        {
+            if(!CountOnlyRealizedWorkStore::Instance().Store(record_,path_))
+                std::cerr << "[RealizedWork] COUNT_ONLY fixed store rejected invocation "
+                          << record_.invocationId << std::endl;
+            return;
+        }
+        (void)LogRealizedWorkInvocation(path_,record_);
+    }
+private:
+    RealizedWorkInvocationRecord &record_;
+    const char *path_;
+    RealizedWorkMode mode_;
+    std::chrono::steady_clock::time_point start_;
+};
+
+struct PoseMeasurementTrace
+{
+    bool valid;
+    unsigned long mapPointId;
+    const char *measurementType;
+    float p, u, h, rawConflict, persistentConflict;
+    float baseInformationScale, beliefReliability, dynamicOnlyReliability;
+    float effectiveReliability, effectiveInformationScale;
+    double baseInitialChi2, chi2Threshold, geometryRatio, initialChi2, finalChi2;
+    bool geometryProtected;
+    bool initialInlier, finalInlier, contributedToFinalOptimization;
+    bool recoveryCandidate, gpEligible, recoverySelected;
+    const char *recoveryMode;
+    std::uint64_t recoverySeed, recoveryCall;
+    int finalLevel;
+    double roundChi2[4];
+    int roundInlier[4], roundLevel[4], roundActiveBefore[4];
+
+    PoseMeasurementTrace()
+        : valid(false), mapPointId(0), measurementType(""), p(0.0f), u(0.0f),
+          h(0.0f), rawConflict(0.0f), persistentConflict(0.0f),
+          baseInformationScale(0.0f), beliefReliability(1.0f),
+          dynamicOnlyReliability(1.0f), effectiveReliability(1.0f),
+          effectiveInformationScale(0.0f), baseInitialChi2(0.0),
+          chi2Threshold(0.0), geometryRatio(0.0), initialChi2(0.0), finalChi2(0.0),
+          geometryProtected(false),
+          initialInlier(true), finalInlier(true),
+          recoveryCandidate(false), gpEligible(false), recoverySelected(false),
+          recoveryMode("NONE"), recoverySeed(0), recoveryCall(0),
+          contributedToFinalOptimization(false), finalLevel(0)
+    {
+        for(int i=0; i<4; ++i)
+        {
+            roundChi2[i] = std::numeric_limits<double>::quiet_NaN();
+            roundInlier[i] = -1;
+            roundLevel[i] = -1;
+            roundActiveBefore[i] = -1;
+        }
+    }
+};
+
+struct RecoveryControlCandidate
+{
+    bool mono;
+    size_t featureIndex;
+    g2o::EdgeSE3ProjectXYZOnlyPose *monoEdge;
+    g2o::EdgeStereoSE3ProjectXYZOnlyPose *stereoEdge;
+    float baseInformationScale, temporalReliability;
+    float beliefReliability, dynamicOnlyReliability;
+    bool gpEligible;
+};
+
+std::uint64_t RecoveryControlSeed()
+{
+    const char *value = std::getenv("ORB_SLAM2_RECOVERY_RANDOM_SEED");
+    if(!value || !value[0])
+        return 0;
+    char *end = NULL;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    return end == value ? 0 : static_cast<std::uint64_t>(parsed);
+}
+
+std::uint64_t NextRecoveryControlCall()
+{
+    static std::mutex callMutex;
+    static std::uint64_t call = 0;
+    std::unique_lock<std::mutex> lock(callMutex);
+    return call++;
+}
+
+std::mt19937 RecoveryControlGenerator(const std::uint64_t seed,
+                                      const std::uint64_t frame,
+                                      const std::uint64_t call)
+{
+    std::seed_seq sequence{
+        static_cast<std::uint32_t>(seed), static_cast<std::uint32_t>(seed >> 32),
+        static_cast<std::uint32_t>(frame), static_cast<std::uint32_t>(frame >> 32),
+        static_cast<std::uint32_t>(call), static_cast<std::uint32_t>(call >> 32)};
+    return std::mt19937(sequence);
+}
+
+void LogPoseMeasurements(const Frame *pFrame,
+                         const std::vector<PoseMeasurementTrace> &traces)
+{
+    const char *path = std::getenv("ORB_SLAM2_OPTIMIZER_MEASUREMENT_LOG");
+    if(!path || !path[0])
+        return;
+    static std::mutex logMutex;
+    std::unique_lock<std::mutex> lock(logMutex);
+    std::ifstream check(path);
+    const bool needsHeader = !check.good() || check.peek() == std::ifstream::traits_type::eof();
+    check.close();
+    std::ofstream out(path, std::ios::app);
+    if(!out)
+        return;
+    if(needsHeader)
+    {
+        out << "frame_id,map_point_id,uncertainty_mode,measurement_policy,measurement_type,"
+               "p,u,h,raw_conflict,persistent_conflict,reliability,belief_reliability,"
+               "dynamic_only_reliability,base_initial_chi2,chi2_threshold,q,geometry_protected,"
+               "recovery_candidate,gp_eligible,recovery_selected,recovery_mode,"
+               "recovery_seed,recovery_call,effective_reliability,"
+               "base_information_scale,effective_information_scale,"
+               "initial_chi2,initial_inlier,";
+        for(int i=0; i<4; ++i)
+            out << "round" << i << "_active_before,round" << i << "_chi2,round"
+                << i << "_inlier,round" << i << "_level,";
+        out << "final_chi2,final_inlier,final_edge_level,final_active,"
+               "contributed_to_final_pose_optimization\n";
+    }
+    out << std::setprecision(9);
+    for(size_t i=0; i<traces.size(); ++i)
+    {
+        const PoseMeasurementTrace &t = traces[i];
+        if(!t.valid)
+            continue;
+        out << pFrame->mnId << ',' << t.mapPointId << ','
+            << SemanticConfig::UncertaintyModeName() << ','
+            << SemanticConfig::MeasurementPolicyName() << ',' << t.measurementType << ','
+            << t.p << ',' << t.u << ',' << t.h << ',' << t.rawConflict << ','
+            << t.persistentConflict << ',' << t.effectiveReliability << ','
+            << t.beliefReliability << ',' << t.dynamicOnlyReliability << ','
+            << t.baseInitialChi2 << ',' << t.chi2Threshold << ',' << t.geometryRatio << ','
+            << (t.geometryProtected ? 1 : 0) << ','
+            << (t.recoveryCandidate ? 1 : 0) << ',' << (t.gpEligible ? 1 : 0) << ','
+            << (t.recoverySelected ? 1 : 0) << ',' << t.recoveryMode << ','
+            << t.recoverySeed << ',' << t.recoveryCall << ','
+            << t.effectiveReliability << ','
+            << t.baseInformationScale << ',' << t.effectiveInformationScale << ','
+            << t.initialChi2 << ','
+            << (t.initialInlier ? 1 : 0) << ',';
+        for(int r=0; r<4; ++r)
+            out << t.roundActiveBefore[r] << ',' << t.roundChi2[r] << ','
+                << t.roundInlier[r] << ',' << t.roundLevel[r] << ',';
+        out << t.finalChi2 << ',' << (t.finalInlier ? 1 : 0) << ','
+            << t.finalLevel << ',' << (t.finalLevel == 0 ? 1 : 0) << ','
+            << (t.contributedToFinalOptimization ? 1 : 0) << '\n';
+    }
+}
+}
+
+/**
+ * @brief 全局BA： pMap中所有的MapPoints和关键帧做bundle adjustment优化
+ * 这个全局BA优化在本程序中有两个地方使用：
+ * 1、单目初始化：CreateInitialMapMonocular函数
+ * 2、闭环优化：RunGlobalBundleAdjustment函数
+ * @param[in] pMap                  地图点
+ * @param[in] nIterations           迭代次数
+ * @param[in] pbStopFlag            外部控制BA结束标志
+ * @param[in] nLoopKF               形成了闭环的当前关键帧的id
+ * @param[in] bRobust               是否使用鲁棒核函数
+ */
+void Optimizer::GlobalBundleAdjustemnt(Map* pMap, int nIterations, bool* pbStopFlag, const unsigned long nLoopKF, const bool bRobust)
+{
+    // 获取地图中的所有关键帧
+    vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
+    // 获取地图中的所有地图点
+    vector<MapPoint*> vpMP = pMap->GetAllMapPoints();
+    // 调用GBA
+    BundleAdjustment(vpKFs,vpMP,nIterations,pbStopFlag, nLoopKF, bRobust);
+}
+
+/**
+ * @brief bundle adjustment 优化过程
+ * 1. Vertex: g2o::VertexSE3Expmap()，即当前帧的Tcw
+ *            g2o::VertexSBAPointXYZ()，MapPoint的mWorldPos
+ * 2. Edge:
+ *     - g2o::EdgeSE3ProjectXYZ()，BaseBinaryEdge
+ *         + Vertex：待优化当前帧的Tcw
+ *         + Vertex：待优化MapPoint的mWorldPos
+ *         + measurement：MapPoint在当前帧中的二维位置(u,v)
+ *         + InfoMatrix: invSigma2(与特征点所在的尺度有关)
+ * 
+ * @param[in] vpKFs                 参与BA的所有关键帧
+ * @param[in] vpMP                  参与BA的所有地图点
+ * @param[in] nIterations           优化迭代次数
+ * @param[in] pbStopFlag            外部控制BA结束标志
+ * @param[in] nLoopKF               形成了闭环的当前关键帧的id
+ * @param[in] bRobust               是否使用核函数
+ */
+void Optimizer::BundleAdjustment(const vector<KeyFrame *> &vpKFs, const vector<MapPoint *> &vpMP,
+                                 int nIterations, bool* pbStopFlag, const unsigned long nLoopKF, const bool bRobust)
+{
+    // 不参与优化的地图点
+    vector<bool> vbNotIncludedMP;
+    vbNotIncludedMP.resize(vpMP.size());
+
+    // Step 1 初始化g2o优化器
+    g2o::SparseOptimizer optimizer;
+    g2o::BlockSolver_6_3::LinearSolverType * linearSolver;
+
+    linearSolver = new g2o::LinearSolverEigen<g2o::BlockSolver_6_3::PoseMatrixType>();
+
+    g2o::BlockSolver_6_3 * solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
+
+    // 使用LM算法优化
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+    optimizer.setAlgorithm(solver);
+
+    // 如果这个时候外部请求终止，那就结束
+    // 注意这句执行之后，外部再请求结束BA，就结束不了了
+    if(pbStopFlag)
+        optimizer.setForceStopFlag(pbStopFlag);
+
+    // 记录添加到优化器中的顶点的最大关键帧id
+    long unsigned int maxKFid = 0;
+
+    // Step 2 向优化器添加顶点
+
+    // Set KeyFrame vertices
+    // Step 2.1 ：向优化器添加关键帧位姿顶点
+    // 对于当前地图中的所有关键帧
+    for(size_t i=0; i<vpKFs.size(); i++)
+    {
+        KeyFrame* pKF = vpKFs[i];
+        // 去除无效的
+        if(pKF->isBad())
+            continue;
+        
+        // 对于每一个能用的关键帧构造SE3顶点,其实就是当前关键帧的位姿
+        g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
+        vSE3->setEstimate(Converter::toSE3Quat(pKF->GetPose()));
+        // 顶点的id就是关键帧在所有关键帧中的id
+        vSE3->setId(pKF->mnId); 
+        // 只有第0帧关键帧不优化（参考基准）
+        vSE3->setFixed(pKF->mnId==0);
+
+        // 向优化器中添加顶点，并且更新maxKFid
+        optimizer.addVertex(vSE3);
+        if(pKF->mnId>maxKFid)
+            maxKFid=pKF->mnId;
+    }
+
+    // 卡方分布 95% 以上可信度的时候的阈值
+    const float thHuber2D = sqrt(5.99);     // 自由度为2
+    const float thHuber3D = sqrt(7.815);    // 自由度为3
+
+    // Set MapPoint vertices
+    // Step 2.2：向优化器添加MapPoints顶点
+    // 遍历地图中的所有地图点
+    for(size_t i=0; i<vpMP.size(); i++)
+    {
+        MapPoint* pMP = vpMP[i];
+        // 跳过无效地图点
+        if(pMP->isBad())
+            continue;
+
+        // 创建顶点
+        g2o::VertexSBAPointXYZ* vPoint = new g2o::VertexSBAPointXYZ();
+        // 注意由于地图点的位置是使用cv::Mat数据类型表示的,这里需要转换成为Eigen::Vector3d类型
+        vPoint->setEstimate(Converter::toVector3d(pMP->GetWorldPos()));
+        // 前面记录maxKFid 是在这里使用的
+        const int id = pMP->mnId+maxKFid+1;
+        vPoint->setId(id);
+        // 注意g2o在做BA的优化时必须将其所有地图点全部schur掉，否则会出错。
+        // 原因是使用了g2o::LinearSolver<BalBlockSolver::PoseMatrixType>这个类型来指定linearsolver,
+        // 其中模板参数当中的位姿矩阵类型在程序中为相机姿态参数的维度，于是BA当中schur消元后解得线性方程组必须是只含有相机姿态变量。
+        // Ceres库则没有这样的限制
+        vPoint->setMarginalized(true);
+        optimizer.addVertex(vPoint);
+
+        // 取出地图点和关键帧之间观测的关系
+        const map<KeyFrame*,size_t> observations = pMP->GetObservations();
+
+        // 边计数
+        int nEdges = 0;
+        //SET EDGES
+        // Step 3：向优化器添加投影边（是在遍历地图点、添加地图点的顶点的时候顺便添加的）
+        // 遍历观察到当前地图点的所有关键帧
+        for(map<KeyFrame*,size_t>::const_iterator mit=observations.begin(); mit!=observations.end(); mit++)
+        {
+
+            KeyFrame* pKF = mit->first;
+            // 跳过不合法的关键帧
+            if(pKF->isBad() || pKF->mnId>maxKFid)
+                continue;
+
+            nEdges++;
+            // 取出该地图点对应该关键帧的2D特征点
+            const cv::KeyPoint &kpUn = pKF->mvKeysUn[mit->second];
+
+            if(pKF->mvuRight[mit->second]<0)
+            {
+                // 如果是单目相机按照下面操作
+                // 构造观测
+                Eigen::Matrix<double,2,1> obs;
+                obs << kpUn.pt.x, kpUn.pt.y;
+
+                // 创建边
+                g2o::EdgeSE3ProjectXYZ* e = new g2o::EdgeSE3ProjectXYZ();
+                // 填充数据，构造约束关系
+                // 第0个顶点对应的id 是地图点的id
+                e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
+                // 第1个顶点对应的id是 关键帧的id
+                e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKF->mnId)));
+                e->setMeasurement(obs);
+                // 信息矩阵，也是协方差，表明了这个约束的观测在各个维度（x,y）上的可信程度，在我们这里对于具体的一个点，两个坐标的可信程度都是相同的，
+                // 其可信程度受到特征点在图像金字塔中的图层有关，图层越高，可信度越差
+                // 为了避免出现信息矩阵中元素为负数的情况，这里使用的是sigma^(-2)
+                const float &invSigma2 = pKF->mvInvLevelSigma2[kpUn.octave];
+                e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
+
+                // 如果要使用鲁棒核函数
+                if(bRobust)
+                {
+                    g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
+                    e->setRobustKernel(rk);
+                    // 这里的重投影误差，自由度为2，所以这里设置为卡方分布中自由度为2的阈值，如果重投影的误差大约大于1个像素的时候，就认为不太靠谱的点了，
+                    // 核函数是为了避免其误差的平方项出现数值上过大的增长
+                    rk->setDelta(thHuber2D);
+                }
+
+                // 设置相机内参
+                e->fx = pKF->fx;
+                e->fy = pKF->fy;
+                e->cx = pKF->cx;
+                e->cy = pKF->cy;
+                // 添加边
+                optimizer.addEdge(e);
+            }
+            else
+            {
+                // 双目或RGBD相机按照下面操作
+                // 双目相机的观测数据则是由三个部分组成：投影点的x坐标，投影点的y坐标，以及投影点在右目中的x坐标（默认y方向上已经对齐了）
+                Eigen::Matrix<double,3,1> obs;
+                const float kp_ur = pKF->mvuRight[mit->second];
+                obs << kpUn.pt.x, kpUn.pt.y, kp_ur;
+
+                // 对于双目输入，g2o也有专门的误差边
+                g2o::EdgeStereoSE3ProjectXYZ* e = new g2o::EdgeStereoSE3ProjectXYZ();
+                // 填充
+                e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
+                e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKF->mnId)));
+                e->setMeasurement(obs);
+                // 信息矩阵这里是相同的，考虑的是左目特征点的所在图层
+                const float &invSigma2 = pKF->mvInvLevelSigma2[kpUn.octave];
+                Eigen::Matrix3d Info = Eigen::Matrix3d::Identity()*invSigma2;
+                e->setInformation(Info);
+
+                // 如果要使用鲁棒核函数
+                if(bRobust)
+                {
+                    g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
+                    e->setRobustKernel(rk);
+                    // 由于现在的观测有三个值，重投影误差会有三个平方项的和组成，因此对应的卡方分布的自由度为3，所以这里设置的也是自由度为3的时候的阈值
+                    rk->setDelta(thHuber3D);
+                }
+
+                // 填充相机的基本参数
+                e->fx = pKF->fx;
+                e->fy = pKF->fy;
+                e->cx = pKF->cx;
+                e->cy = pKF->cy;
+                e->bf = pKF->mbf;
+
+                optimizer.addEdge(e);
+            }  
+        } // 向优化器添加投影边,也就是遍历所有观测到当前地图点的关键帧
+
+        // 如果因为一些特殊原因,实际上并没有任何关键帧观测到当前的这个地图点,那么就删除掉这个顶点,并且这个地图点也就不参与优化
+        if(nEdges==0)
+        {
+            optimizer.removeVertex(vPoint);
+            vbNotIncludedMP[i]=true;
+        }
+        else
+        {
+            vbNotIncludedMP[i]=false;
+        }
+    }
+
+    // Optimize!
+    // Step 4：开始优化
+    optimizer.initializeOptimization();
+    optimizer.optimize(nIterations);
+
+    // Recover optimized data
+    // Step 5：得到优化的结果
+
+    // Step 5.1 遍历所有的关键帧
+    for(size_t i=0; i<vpKFs.size(); i++)
+    {
+        KeyFrame* pKF = vpKFs[i];
+        if(pKF->isBad())
+            continue;
+
+        // 获取到优化后的位姿
+        g2o::VertexSE3Expmap* vSE3 = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(pKF->mnId));
+        g2o::SE3Quat SE3quat = vSE3->estimate();
+        if(nLoopKF==0)
+        {
+            // 原则上来讲不会出现"当前闭环关键帧是第0帧"的情况,如果这种情况出现,只能够说明是在创建初始地图点的时候调用的这个全局BA函数.
+            // 这个时候,地图中就只有两个关键帧,其中优化后的位姿数据可以直接写入到帧的成员变量中
+            pKF->SetPose(Converter::toCvMat(SE3quat));
+        }
+        else
+        {
+            // 正常的操作,先把优化后的位姿写入到帧的一个专门的成员变量mTcwGBA中备用
+            pKF->mTcwGBA.create(4,4,CV_32F);
+            Converter::toCvMat(SE3quat).copyTo(pKF->mTcwGBA);
+            pKF->mnBAGlobalForKF = nLoopKF;
+        }
+    }
+
+    // Step 5.2 Points
+    // 遍历所有地图点,去除其中没有参与优化过程的地图点
+    for(size_t i=0; i<vpMP.size(); i++)
+    {
+        if(vbNotIncludedMP[i])
+            continue;
+
+        MapPoint* pMP = vpMP[i];
+
+        if(pMP->isBad())
+            continue;
+
+        // 获取优化之后的地图点的位置
+        g2o::VertexSBAPointXYZ* vPoint = static_cast<g2o::VertexSBAPointXYZ*>(optimizer.vertex(pMP->mnId+maxKFid+1));
+
+        // 和上面对关键帧的操作一样
+        if(nLoopKF==0)  
+        {
+            // 如果这个GBA是在创建初始地图的时候调用的话,那么地图点的位姿也可以直接写入
+            pMP->SetWorldPos(Converter::toCvMat(vPoint->estimate()));
+            pMP->UpdateNormalAndDepth();
+        }
+        else
+        {
+            // 反之,如果是正常的闭环过程调用,就先临时保存一下
+            pMP->mPosGBA.create(3,1,CV_32F);
+            Converter::toCvMat(vPoint->estimate()).copyTo(pMP->mPosGBA);
+            pMP->mnBAGlobalForKF = nLoopKF;
+        }// 判断是因为什么原因调用的GBA
+    } // 遍历所有地图点,保存优化之后地图点的位姿
+}
+
+/*
+ * @brief Pose Only Optimization
+ * 
+ * 3D-2D 最小化重投影误差 e = (u,v) - project(Tcw*Pw) \n
+ * 只优化Frame的Tcw，不优化MapPoints的坐标
+ * 
+ * 1. Vertex: g2o::VertexSE3Expmap()，即当前帧的Tcw
+ * 2. Edge:
+ *     - g2o::EdgeSE3ProjectXYZOnlyPose()，BaseUnaryEdge
+ *         + Vertex：待优化当前帧的Tcw
+ *         + measurement：MapPoint在当前帧中的二维位置(u,v)
+ *         + InfoMatrix: invSigma2(与特征点所在的尺度有关)
+ *     - g2o::EdgeStereoSE3ProjectXYZOnlyPose()，BaseUnaryEdge
+ *         + Vertex：待优化当前帧的Tcw
+ *         + measurement：MapPoint在当前帧中的二维位置(ul,v,ur)
+ *         + InfoMatrix: invSigma2(与特征点所在的尺度有关)
+ *
+ * @param   pFrame Frame
+ * @return  inliers数量
+ */
+int Optimizer::PoseOptimization(Frame *pFrame, const char *callSource)
+{
+    const char *realizedWorkPathValue=std::getenv("ORB_SLAM2_REALIZED_WORK_LOG");
+    const RealizedWorkMode realizedWorkMode=CurrentRealizedWorkMode();
+    RealizedWorkInvocationRecord realizedWork;
+#if ORB_SLAM2_REALIZED_WORK_COUNTERS
+    realizedWork.enabled=realizedWorkPathValue && realizedWorkPathValue[0]
+        && realizedWorkMode!=RealizedWorkOff;
+#else
+    realizedWork.enabled=false;
+#endif
+    realizedWork.frameId=pFrame?pFrame->mnId:0;
+    realizedWork.invocationId=NextPoseBudgetInvocation();
+    CopyFixedText(realizedWork.callSource,sizeof(realizedWork.callSource),
+                  callSource&&callSource[0]?callSource:"UNKNOWN");
+    realizedWork.legacyBudgetLogEnabled=
+        std::getenv("ORB_SLAM2_POSE_BUDGET_LOG")!=NULL;
+    realizedWork.legacyIterationLogEnabled=
+        std::getenv("ORB_SLAM2_POSE_ITERATION_LOG")!=NULL;
+    ScopedRealizedWorkInvocation realizedWorkScope(
+        realizedWork,realizedWorkPathValue?realizedWorkPathValue:"",
+        realizedWorkMode);
+    ScopedExperimentTimer poseOptimizationTiming(
+        TimingComponent::PoseOptimization, true);
+    ExperimentTimingAggregate geometryProtectionTiming(
+        TimingComponent::GeometryProtection);
+    // 该优化函数主要用于Tracking线程中：运动跟踪、参考帧跟踪、地图跟踪、重定位
+
+    // Step 1：构造g2o优化器, BlockSolver_6_3表示：位姿 _PoseDim 为6维，路标点 _LandmarkDim 是3维
+    g2o::SparseOptimizer optimizer;
+    g2o::BlockSolver_6_3::LinearSolverType * linearSolver;
+
+    linearSolver = new g2o::LinearSolverDense<g2o::BlockSolver_6_3::PoseMatrixType>();
+
+    g2o::BlockSolver_6_3 * solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
+
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+    optimizer.setAlgorithm(solver);
+#if ORB_SLAM2_REALIZED_WORK_COUNTERS
+    const bool workCountersEnabled=realizedWork.enabled;
+    optimizer.setWorkInstrumentationEnabled(workCountersEnabled);
+    solver->setWorkInstrumentationEnabled(workCountersEnabled);
+#else
+    const bool workCountersEnabled=false;
+#endif
+
+    // 输入的帧中,有效的,参与优化过程的2D-3D点对
+    int nInitialCorrespondences=0;
+
+    // Set Frame vertex
+    // Step 2：添加顶点：待优化当前帧的Tcw
+    g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
+    vSE3->setEstimate(Converter::toSE3Quat(pFrame->mTcw));
+     // 设置id
+    vSE3->setId(0);    
+    // 要优化的变量，所以不能固定
+    vSE3->setFixed(false);
+    optimizer.addVertex(vSE3);
+
+    // Set MapPoint vertices
+    const int N = pFrame->N;
+    std::vector<std::uint64_t> snapshotMapPointIds(static_cast<std::size_t>(N),0);
+    std::vector<double> snapshotBaseInformation(static_cast<std::size_t>(N),1.0);
+    std::vector<double> snapshotTemporalReliability(static_cast<std::size_t>(N),1.0);
+    std::vector<double> snapshotBeliefReliability(static_cast<std::size_t>(N),1.0);
+    std::vector<double> snapshotFinalReliability(static_cast<std::size_t>(N),1.0);
+    const bool measurementLogging =
+        std::getenv("ORB_SLAM2_OPTIMIZER_MEASUREMENT_LOG") != NULL;
+    vector<PoseMeasurementTrace> measurementTraces(
+        measurementLogging ? static_cast<size_t>(N) : 0);
+    const SemanticConfig::MeasurementPolicyMode measurementPolicy =
+        SemanticConfig::MeasurementPolicy();
+    const bool geometryPolicy = measurementPolicy
+        == SemanticConfig::MEASUREMENT_POLICY_GEOMETRY_PROTECTED;
+    const bool randomRecoveryPolicy = measurementPolicy
+        == SemanticConfig::MEASUREMENT_POLICY_RANDOM_COUNT_MATCHED;
+    const std::uint64_t recoverySeed = randomRecoveryPolicy
+        ? RecoveryControlSeed() : 0;
+    const std::uint64_t recoveryCall = randomRecoveryPolicy
+        ? NextRecoveryControlCall() : 0;
+    vector<RecoveryControlCandidate> recoveryCandidates;
+    recoveryCandidates.reserve(N);
+
+    // for Monocular
+    vector<g2o::EdgeSE3ProjectXYZOnlyPose*> vpEdgesMono;
+    vector<size_t> vnIndexEdgeMono;
+    vpEdgesMono.reserve(N);
+    vnIndexEdgeMono.reserve(N);
+
+    // for Stereo
+    vector<g2o::EdgeStereoSE3ProjectXYZOnlyPose*> vpEdgesStereo;
+    vector<size_t> vnIndexEdgeStereo;
+    vpEdgesStereo.reserve(N);
+    vnIndexEdgeStereo.reserve(N);
+
+    int nStaticEdges = 0;
+    int nUncertainEdges = 0;
+    int nDynamicEdges = 0;
+
+    // 自由度为2的卡方分布，显著性水平为0.05，对应的临界阈值5.991
+    const float deltaMono = sqrt(5.991);  
+    // 自由度为3的卡方分布，显著性水平为0.05，对应的临界阈值7.815   
+    const float deltaStereo = sqrt(7.815);     
+
+    // Step 3：添加一元边
+    {
+    // 锁定地图点。由于需要使用地图点来构造顶点和边,因此不希望在构造的过程中部分地图点被改写造成不一致甚至是段错误
+    unique_lock<mutex> lock(MapPoint::mGlobalMutex);
+
+    // 遍历当前地图中的所有地图点
+    for(int i=0; i<N; i++)
+    {
+        MapPoint* pMP = pFrame->mvpMapPoints[i];
+        // 如果这个地图点还存在没有被剔除掉
+        if(pMP)
+        {
+            snapshotMapPointIds[static_cast<std::size_t>(i)]=pMP->mnId;
+            const MapPoint::TemporalReliabilityState reliabilityState =
+                pMP->GetTemporalReliabilityState();
+            const float temporalReliability =
+                SemanticConfig::UseLegacyTemporalWeight()
+                    ? pMP->GetTemporalReliabilityWeight() : 1.0f;
+            const float cachedBeliefReliability =
+                i < static_cast<int>(pFrame->mvMeasurementReliability.size())
+                    ? pFrame->mvMeasurementReliability[i]
+                    : 1.0f;
+            MapPointDynamicBelief belief;
+            if(geometryPolicy || randomRecoveryPolicy || measurementLogging)
+                belief = pMP->GetDynamicBelief();
+            // BELIEF_ONLY deliberately preserves the frozen V3 measurement
+            // cache. Geometry-protected policy uses one coherent MapPoint
+            // snapshot for p, u, r_b, and the geometry decision.
+            const float beliefReliability = (geometryPolicy || randomRecoveryPolicy)
+                ? SemanticConfig::BeliefReliability(
+                    belief.dynamic_probability, belief.uncertainty)
+                : cachedBeliefReliability;
+            // Paper2 extension:
+            // Belief reliability is intentionally scoped to tracking pose
+            // optimization in this phase. BA and loop-closing remain unchanged.
+            if(reliabilityState == MapPoint::TemporalReliabilityState::UNCERTAIN)
+                ++nUncertainEdges;
+            else if(reliabilityState == MapPoint::TemporalReliabilityState::DYNAMIC)
+                ++nDynamicEdges;
+            else
+                ++nStaticEdges;
+
+            // Monocular observation
+            // 单目情况
+            if(pFrame->mvuRight[i]<0)
+            {
+                nInitialCorrespondences++;
+                pFrame->mvbOutlier[i] = false;
+
+                // 对这个地图点的观测
+                Eigen::Matrix<double,2,1> obs;
+                const cv::KeyPoint &kpUn = pFrame->mvKeysUn[i];
+                obs << kpUn.pt.x, kpUn.pt.y;
+                // 新建节点,注意这个节点的只是优化位姿Pose
+                g2o::EdgeSE3ProjectXYZOnlyPose* e = new g2o::EdgeSE3ProjectXYZOnlyPose();
+                // 填充
+                e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
+                e->setMeasurement(obs);
+                // 这个点的可信程度和特征点所在的图层有关
+                const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];
+                e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
+                // 在这里使用了鲁棒核函数
+                g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
+                e->setRobustKernel(rk);
+                rk->setDelta(deltaMono);    // 前面提到过的卡方阈值
+
+                // 设置相机内参
+                e->fx = pFrame->fx;
+                e->fy = pFrame->fy;
+                e->cx = pFrame->cx;
+                e->cy = pFrame->cy;
+                // 地图点的空间位置,作为迭代的初始值
+                cv::Mat Xw = pMP->GetWorldPos();
+                e->Xw[0] = Xw.at<float>(0);
+                e->Xw[1] = Xw.at<float>(1);
+                e->Xw[2] = Xw.at<float>(2);
+
+                const std::chrono::steady_clock::time_point geometryStart =
+                    geometryPolicy ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point();
+                double baseInitialChi2 = 0.0;
+                if(geometryPolicy || randomRecoveryPolicy || measurementLogging)
+                {
+                    e->computeError();
+                    baseInitialChi2 = e->chi2();
+                }
+                const float effectiveBeliefReliability =
+                    SemanticConfig::EffectiveBeliefReliability(
+                        beliefReliability, belief.dynamic_probability,
+                        static_cast<float>(baseInitialChi2), 5.991f);
+                const float finalReliability =
+                    temporalReliability * effectiveBeliefReliability;
+                snapshotBaseInformation[static_cast<std::size_t>(i)]=invSigma2;
+                snapshotTemporalReliability[static_cast<std::size_t>(i)]=temporalReliability;
+                snapshotBeliefReliability[static_cast<std::size_t>(i)]=effectiveBeliefReliability;
+                snapshotFinalReliability[static_cast<std::size_t>(i)]=finalReliability;
+                e->setInformation(Eigen::Matrix2d::Identity()*invSigma2*finalReliability);
+                if(geometryPolicy)
+                    geometryProtectionTiming.Add(
+                        std::chrono::duration_cast<std::chrono::duration<double> >(
+                            std::chrono::steady_clock::now() - geometryStart).count(),
+                        1, baseInitialChi2 / 5.991f <= 1.0f ? 1 : 0);
+
+                optimizer.addEdge(e);
+
+                if(measurementLogging)
+                {
+                    PoseMeasurementTrace &trace = measurementTraces[i];
+                    trace.valid = true;
+                    trace.mapPointId = pMP->mnId;
+                    trace.measurementType = "mono";
+                    trace.p = belief.dynamic_probability;
+                    trace.u = belief.uncertainty;
+                    trace.h = belief.conflict_persistence;
+                    trace.rawConflict = belief.conflict;
+                    trace.persistentConflict = belief.conflict * belief.conflict_persistence;
+                    trace.baseInformationScale = invSigma2;
+                    trace.beliefReliability = beliefReliability;
+                    trace.dynamicOnlyReliability =
+                        SemanticConfig::DynamicOnlyReliability(belief.dynamic_probability);
+                    trace.baseInitialChi2 = baseInitialChi2;
+                    trace.chi2Threshold = 5.991;
+                    trace.geometryRatio = baseInitialChi2 / 5.991;
+                    trace.geometryProtected = geometryPolicy
+                        && trace.geometryRatio <= 1.0;
+                    trace.recoveryCandidate = trace.dynamicOnlyReliability
+                        > trace.beliefReliability + 1e-6f;
+                    trace.gpEligible = trace.recoveryCandidate
+                        && trace.geometryRatio <= 1.0;
+                    trace.recoverySelected = geometryPolicy && trace.gpEligible;
+                    trace.recoveryMode = geometryPolicy ? "GP"
+                        : (randomRecoveryPolicy ? "RANDOM_COUNT" : "NONE");
+                    trace.recoverySeed = recoverySeed;
+                    trace.recoveryCall = recoveryCall;
+                    trace.effectiveReliability = effectiveBeliefReliability;
+                    trace.effectiveInformationScale = invSigma2 * finalReliability;
+                    trace.initialChi2 = e->chi2();
+                    trace.finalChi2 = trace.initialChi2;
+                }
+
+                vpEdgesMono.push_back(e);
+                vnIndexEdgeMono.push_back(i);
+                const float dynamicOnlyReliability =
+                    SemanticConfig::DynamicOnlyReliability(belief.dynamic_probability);
+                if(randomRecoveryPolicy
+                   && dynamicOnlyReliability > beliefReliability + 1e-6f)
+                    recoveryCandidates.push_back(RecoveryControlCandidate{
+                        true, static_cast<size_t>(i), e, NULL, invSigma2,
+                        temporalReliability, beliefReliability, dynamicOnlyReliability,
+                        baseInitialChi2 / 5.991 <= 1.0});
+            }
+            else  // Stereo observation 双目
+            {
+                nInitialCorrespondences++;
+                pFrame->mvbOutlier[i] = false;
+
+                //SET EDGE
+                // 观测多了一项右目的坐标
+                Eigen::Matrix<double,3,1> obs;// 这里和单目不同
+                const cv::KeyPoint &kpUn = pFrame->mvKeysUn[i];
+                const float &kp_ur = pFrame->mvuRight[i];
+                obs << kpUn.pt.x, kpUn.pt.y, kp_ur;// 这里和单目不同
+                // 新建节点,注意这里也是只优化位姿
+                g2o::EdgeStereoSE3ProjectXYZOnlyPose* e = new g2o::EdgeStereoSE3ProjectXYZOnlyPose();// 这里和单目不同
+
+                e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
+                e->setMeasurement(obs);
+                // 置信程度主要是看左目特征点所在的图层
+                const float invSigma2 = pFrame->mvInvLevelSigma2[kpUn.octave];
+                e->setInformation(Eigen::Matrix3d::Identity()*invSigma2);
+
+                g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
+                e->setRobustKernel(rk);
+                rk->setDelta(deltaStereo);
+
+                e->fx = pFrame->fx;
+                e->fy = pFrame->fy;
+                e->cx = pFrame->cx;
+                e->cy = pFrame->cy;
+                e->bf = pFrame->mbf;
+                cv::Mat Xw = pMP->GetWorldPos();
+                e->Xw[0] = Xw.at<float>(0);
+                e->Xw[1] = Xw.at<float>(1);
+                e->Xw[2] = Xw.at<float>(2);
+
+                const std::chrono::steady_clock::time_point geometryStart =
+                    geometryPolicy ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point();
+                double baseInitialChi2 = 0.0;
+                if(geometryPolicy || randomRecoveryPolicy || measurementLogging)
+                {
+                    e->computeError();
+                    baseInitialChi2 = e->chi2();
+                }
+                const float effectiveBeliefReliability =
+                    SemanticConfig::EffectiveBeliefReliability(
+                        beliefReliability, belief.dynamic_probability,
+                        static_cast<float>(baseInitialChi2), 7.815f);
+                const float finalReliability =
+                    temporalReliability * effectiveBeliefReliability;
+                snapshotBaseInformation[static_cast<std::size_t>(i)]=invSigma2;
+                snapshotTemporalReliability[static_cast<std::size_t>(i)]=temporalReliability;
+                snapshotBeliefReliability[static_cast<std::size_t>(i)]=effectiveBeliefReliability;
+                snapshotFinalReliability[static_cast<std::size_t>(i)]=finalReliability;
+                e->setInformation(Eigen::Matrix3d::Identity()*invSigma2*finalReliability);
+                if(geometryPolicy)
+                    geometryProtectionTiming.Add(
+                        std::chrono::duration_cast<std::chrono::duration<double> >(
+                            std::chrono::steady_clock::now() - geometryStart).count(),
+                        1, baseInitialChi2 / 7.815f <= 1.0f ? 1 : 0);
+
+                optimizer.addEdge(e);
+
+                if(measurementLogging)
+                {
+                    PoseMeasurementTrace &trace = measurementTraces[i];
+                    trace.valid = true;
+                    trace.mapPointId = pMP->mnId;
+                    // PoseOptimization uses the same 3D edge for stereo and
+                    // RGB-D-derived right-coordinate measurements.
+                    trace.measurementType = "stereo_rgbd_edge";
+                    trace.p = belief.dynamic_probability;
+                    trace.u = belief.uncertainty;
+                    trace.h = belief.conflict_persistence;
+                    trace.rawConflict = belief.conflict;
+                    trace.persistentConflict = belief.conflict * belief.conflict_persistence;
+                    trace.baseInformationScale = invSigma2;
+                    trace.beliefReliability = beliefReliability;
+                    trace.dynamicOnlyReliability =
+                        SemanticConfig::DynamicOnlyReliability(belief.dynamic_probability);
+                    trace.baseInitialChi2 = baseInitialChi2;
+                    trace.chi2Threshold = 7.815;
+                    trace.geometryRatio = baseInitialChi2 / 7.815;
+                    trace.geometryProtected = geometryPolicy
+                        && trace.geometryRatio <= 1.0;
+                    trace.recoveryCandidate = trace.dynamicOnlyReliability
+                        > trace.beliefReliability + 1e-6f;
+                    trace.gpEligible = trace.recoveryCandidate
+                        && trace.geometryRatio <= 1.0;
+                    trace.recoverySelected = geometryPolicy && trace.gpEligible;
+                    trace.recoveryMode = geometryPolicy ? "GP"
+                        : (randomRecoveryPolicy ? "RANDOM_COUNT" : "NONE");
+                    trace.recoverySeed = recoverySeed;
+                    trace.recoveryCall = recoveryCall;
+                    trace.effectiveReliability = effectiveBeliefReliability;
+                    trace.effectiveInformationScale = invSigma2 * finalReliability;
+                    trace.initialChi2 = e->chi2();
+                    trace.finalChi2 = trace.initialChi2;
+                }
+
+                vpEdgesStereo.push_back(e);
+                vnIndexEdgeStereo.push_back(i);
+                const float dynamicOnlyReliability =
+                    SemanticConfig::DynamicOnlyReliability(belief.dynamic_probability);
+                if(randomRecoveryPolicy
+                   && dynamicOnlyReliability > beliefReliability + 1e-6f)
+                    recoveryCandidates.push_back(RecoveryControlCandidate{
+                        false, static_cast<size_t>(i), NULL, e, invSigma2,
+                        temporalReliability, beliefReliability, dynamicOnlyReliability,
+                        baseInitialChi2 / 7.815 <= 1.0});
+            } // 根据单目和双目不同的相机输入执行不同的操作过程
+        }
+
+    if(randomRecoveryPolicy && !recoveryCandidates.empty())
+    {
+        // The matched-random control is an instrumented experiment: its
+        // counterfactual GP budget and its audit log must use one source of
+        // truth. Refuse to form a budget without per-measurement traces.
+        if(!measurementLogging)
+            throw std::runtime_error(
+                "RANDOM_COUNT_MATCHED requires ORB_SLAM2_OPTIMIZER_MEASUREMENT_LOG");
+        size_t gpCount = 0;
+        for(size_t i=0; i<recoveryCandidates.size(); ++i)
+            if(measurementTraces[recoveryCandidates[i].featureIndex].gpEligible)
+                ++gpCount;
+        for(size_t i=0; i<recoveryCandidates.size(); ++i)
+            measurementTraces[recoveryCandidates[i].featureIndex].recoverySelected = false;
+        vector<size_t> order(recoveryCandidates.size());
+        for(size_t i=0; i<order.size(); ++i)
+            order[i] = i;
+        std::mt19937 generator = RecoveryControlGenerator(
+            recoverySeed, static_cast<std::uint64_t>(pFrame->mnId), recoveryCall);
+        std::shuffle(order.begin(), order.end(), generator);
+        for(size_t j=0; j<gpCount; ++j)
+        {
+            RecoveryControlCandidate &candidate = recoveryCandidates[order[j]];
+            const float finalReliability = candidate.temporalReliability
+                * candidate.dynamicOnlyReliability;
+            snapshotBeliefReliability[candidate.featureIndex]=candidate.dynamicOnlyReliability;
+            snapshotFinalReliability[candidate.featureIndex]=finalReliability;
+            if(candidate.mono)
+                candidate.monoEdge->setInformation(
+                    Eigen::Matrix2d::Identity()*candidate.baseInformationScale*finalReliability);
+            else
+                candidate.stereoEdge->setInformation(
+                    Eigen::Matrix3d::Identity()*candidate.baseInformationScale*finalReliability);
+            if(measurementLogging)
+            {
+                PoseMeasurementTrace &trace = measurementTraces[candidate.featureIndex];
+                trace.recoverySelected = true;
+                trace.effectiveReliability = candidate.dynamicOnlyReliability;
+                trace.effectiveInformationScale = candidate.baseInformationScale
+                    * finalReliability;
+                trace.initialChi2 = trace.baseInitialChi2 * finalReliability;
+                trace.finalChi2 = trace.initialChi2;
+            }
+        }
+    }
+    }
+    } // 离开临界区
+
+    // 如果没有足够的匹配点,那么就只好放弃了
+    realizedWork.initialCorrespondences=nInitialCorrespondences;
+    if(nInitialCorrespondences<3)
+    {
+        CopyFixedText(realizedWork.status,sizeof(realizedWork.status),
+                      "INSUFFICIENT_CORRESPONDENCES");
+        if(measurementLogging)
+            LogPoseMeasurements(pFrame, measurementTraces);
+        return 0;
+    }
+
+    // We perform 4 optimizations, after each optimization we classify observation as inlier/outlier
+    // At the next optimization, outliers are not included, but at the end they can be classified as inliers again.
+    // Step 4：开始优化，总共优化四次，每次优化迭代10次,每次优化后，将观测分为outlier和inlier，outlier不参与下次优化
+    // 由于每次优化后是对所有的观测进行outlier和inlier判别，因此之前被判别为outlier有可能变成inlier，反之亦然
+    // 基于卡方检验计算出的阈值（假设测量有一个像素的偏差）
+    const float chi2Mono[4]={5.991,5.991,5.991,5.991};          // 单目
+    const float chi2Stereo[4]={7.815,7.815,7.815, 7.815};       // 双目
+    const char *poseBudgetValue=std::getenv("ORB_SLAM2_POSE_BUDGET_MODE");
+    const std::string poseBudgetMode=poseBudgetValue&&poseBudgetValue[0]
+        ?std::string(poseBudgetValue):std::string("A");
+    int selectedIterations=10;
+    if(poseBudgetMode=="B1") selectedIterations=1;
+    else if(poseBudgetMode=="B3") selectedIterations=3;
+    else if(poseBudgetMode=="B4") selectedIterations=4;
+    else if(poseBudgetMode=="B5") selectedIterations=5;
+    else if(poseBudgetMode=="B10" || poseBudgetMode=="A") selectedIterations=10;
+    else
+        throw std::runtime_error(
+            "ORB_SLAM2_POSE_BUDGET_MODE must be A, B1, B3, B4, B5, or B10");
+    const int its[4]={selectedIterations,selectedIterations,
+                      selectedIterations,selectedIterations};
+    int actualIterations[4]={0,0,0,0};
+    const char *snapshotDirectory=std::getenv("ORB_SLAM2_BSRW_SNAPSHOT_DIR");
+
+    // bad 的地图点个数
+    int nBad=0;
+    // 一共进行四次优化
+    for(size_t it=0; it<4; it++)
+    {
+        RealizedWorkRoundRecord &workRound=realizedWork.rounds[it];
+        workRound.executed=true;
+        workRound.requested=its[it];
+        ++realizedWork.executedRounds;
+
+        vSE3->setEstimate(Converter::toSE3Quat(pFrame->mTcw));
+        ExportPoseOptimizationSnapshot(
+            snapshotDirectory,pFrame,vSE3,vpEdgesMono,vnIndexEdgeMono,
+            vpEdgesStereo,vnIndexEdgeStereo,snapshotMapPointIds,
+            snapshotBaseInformation,snapshotTemporalReliability,
+            snapshotBeliefReliability,snapshotFinalReliability,
+            realizedWork.invocationId,realizedWork.callSource,
+            static_cast<int>(it)+1,its[it],chi2Mono[it],chi2Stereo[it]);
+        if(measurementLogging)
+        {
+            for(size_t i=0; i<vpEdgesMono.size(); ++i)
+                measurementTraces[vnIndexEdgeMono[i]].roundActiveBefore[it] =
+                    vpEdgesMono[i]->level() == 0 ? 1 : 0;
+            for(size_t i=0; i<vpEdgesStereo.size(); ++i)
+                measurementTraces[vnIndexEdgeStereo[i]].roundActiveBefore[it] =
+                    vpEdgesStereo[i]->level() == 0 ? 1 : 0;
+        }
+        // 其实就是初始化优化器,这里的参数0就算是不填写,默认也是0,也就是只对level为0的边进行优化
+        workRound.initializeOk=optimizer.initializeOptimization(0);
+        workRound.activeEdges=static_cast<int>(optimizer.activeEdges().size());
+        workRound.activeVertices=static_cast<int>(optimizer.activeVertices().size());
+        if(workCountersEnabled)
+            solver->resetWorkStatistics();
+        // 开始优化，优化10次
+        const std::chrono::steady_clock::time_point solverCoreStart=
+            std::chrono::steady_clock::now();
+        actualIterations[it]=optimizer.optimize(its[it]);
+        workRound.optimizeMs=std::chrono::duration_cast<
+            std::chrono::duration<double,std::milli> >(
+                std::chrono::steady_clock::now()-solverCoreStart).count();
+        workRound.optimizeReturn=actualIterations[it];
+        if(workCountersEnabled)
+        {
+            workRound.sparse=optimizer.lastOptimizationRunStatistics();
+            workRound.lm=solver->workStatistics();
+            workRound.lmTermination=solver->lastTerminationReason();
+        }
+
+        nBad=0;
+        // 优化结束,开始遍历参与优化的每一条误差边(单目)
+        for(size_t i=0, iend=vpEdgesMono.size(); i<iend; i++)
+        {
+            g2o::EdgeSE3ProjectXYZOnlyPose* e = vpEdgesMono[i];
+
+            const size_t idx = vnIndexEdgeMono[i];
+
+            // 如果这条误差边是来自于outlier
+            if(pFrame->mvbOutlier[idx])
+            {
+                e->computeError(); 
+            }
+
+            // 就是error*\Omega*error,表征了这个点的误差大小(考虑置信度以后)
+            const float chi2 = e->chi2();
+
+            if(chi2>chi2Mono[it])
+            {                
+                pFrame->mvbOutlier[idx]=true;
+                e->setLevel(1);                 // 设置为outlier , level 1 对应为外点,上面的过程中我们设置其为不优化
+                nBad++;
+            }
+            else
+            {
+                pFrame->mvbOutlier[idx]=false;
+                e->setLevel(0);                 // 设置为inlier, level 0 对应为内点,上面的过程中我们就是要优化这些关系
+            }
+
+            if(measurementLogging)
+            {
+                PoseMeasurementTrace &trace = measurementTraces[idx];
+                trace.roundChi2[it] = chi2;
+                trace.roundInlier[it] = pFrame->mvbOutlier[idx] ? 0 : 1;
+                trace.roundLevel[it] = e->level();
+                trace.finalChi2 = chi2;
+                trace.finalInlier = !pFrame->mvbOutlier[idx];
+                trace.finalLevel = e->level();
+                trace.contributedToFinalOptimization =
+                    trace.roundActiveBefore[it] == 1;
+            }
+
+            if(it==2)
+                e->setRobustKernel(0); // 除了前两次优化需要RobustKernel以外, 其余的优化都不需要 -- 因为重投影的误差已经有明显的下降了
+        } // 对单目误差边的处理
+        // 同样的原理遍历双目的误差边
+        for(size_t i=0, iend=vpEdgesStereo.size(); i<iend; i++)
+        {
+            g2o::EdgeStereoSE3ProjectXYZOnlyPose* e = vpEdgesStereo[i];
+
+            const size_t idx = vnIndexEdgeStereo[i];
+
+            if(pFrame->mvbOutlier[idx])
+            {
+                e->computeError();
+            }
+
+            const float chi2 = e->chi2();
+
+            if(chi2>chi2Stereo[it])
+            {
+                pFrame->mvbOutlier[idx]=true;
+                e->setLevel(1);
+                nBad++;
+            }
+            else
+            {                
+                e->setLevel(0);
+                pFrame->mvbOutlier[idx]=false;
+            }
+
+            if(measurementLogging)
+            {
+                PoseMeasurementTrace &trace = measurementTraces[idx];
+                trace.roundChi2[it] = chi2;
+                trace.roundInlier[it] = pFrame->mvbOutlier[idx] ? 0 : 1;
+                trace.roundLevel[it] = e->level();
+                trace.finalChi2 = chi2;
+                trace.finalInlier = !pFrame->mvbOutlier[idx];
+                trace.finalLevel = e->level();
+                trace.contributedToFinalOptimization =
+                    trace.roundActiveBefore[it] == 1;
+            }
+
+            if(it==2)
+                e->setRobustKernel(0);
+        } // 对双目误差边的处理
+
+        if(optimizer.edges().size()<10)
+        {
+            CopyFixedText(realizedWork.status,sizeof(realizedWork.status),
+                          "GRAPH_EDGE_BREAK");
+            break;
+        }
+    } // 一共要进行四次优化
+
+    if(std::strcmp(realizedWork.status,"STARTED")==0)
+    {
+        bool solverFailure=false;
+        for(std::size_t i=0;i<realizedWork.rounds.size();++i)
+            if(realizedWork.rounds[i].executed
+               && realizedWork.rounds[i].optimizeReturn<=0)
+                solverFailure=true;
+        CopyFixedText(realizedWork.status,sizeof(realizedWork.status),
+                      solverFailure?"SOLVER_FAILURE":"OK");
+    }
+
+    // Recover optimized pose and return number of inliers
+    // Step 5 得到优化后的当前帧的位姿
+    g2o::VertexSE3Expmap* vSE3_recov = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(0));
+    g2o::SE3Quat SE3quat_recov = vSE3_recov->estimate();
+    cv::Mat pose = Converter::toCvMat(SE3quat_recov);
+    pFrame->SetPose(pose);
+
+    if(measurementLogging)
+        LogPoseMeasurements(pFrame, measurementTraces);
+
+    int nUncertainInliers = 0;
+    int nUncertainOutliers = 0;
+    for(int i=0; i<N; ++i)
+    {
+        MapPoint *pMP = pFrame->mvpMapPoints[i];
+        if(!pMP || pMP->GetTemporalReliabilityState()
+                    != MapPoint::TemporalReliabilityState::UNCERTAIN)
+            continue;
+        if(pFrame->mvbOutlier[i])
+            ++nUncertainOutliers;
+        else
+            ++nUncertainInliers;
+    }
+    if(std::getenv("ORB_SLAM2_TEMPORAL_RELIABILITY_LOG") != NULL)
+    std::cout << "[TemporalReliability] frame=" << pFrame->mnId
+              << " mode=" << static_cast<int>(SemanticConfig::ReliabilityMode())
+              << " static_edges=" << nStaticEdges
+              << " uncertain_edges=" << nUncertainEdges
+              << " dynamic_edges=" << nDynamicEdges
+              << " uncertain_inliers=" << nUncertainInliers
+              << " uncertain_outliers=" << nUncertainOutliers
+              << " uncertain_weight=" << SemanticConfig::UncertainWeight()
+              << std::endl;
+
+    // 并且返回内点数目
+    return nInitialCorrespondences-nBad;
+}
+
+void Optimizer::FlushRealizedWorkLog()
+{
+    const RealizedWorkMode mode=CurrentRealizedWorkMode();
+    if(mode==RealizedWorkBuffered)
+    {
+        BufferedRealizedWorkLogger::Instance().Flush();
+        const char *path=std::getenv("ORB_SLAM2_REALIZED_WORK_LOG");
+        if(path && path[0])
+        {
+            std::ofstream status((std::string(path)+".status.csv").c_str());
+            if(status)
+                status << "schema_version,mode,complete,fixed_store_overflow,"
+                          "path_mismatch,transport_failure\n"
+                       << "REALIZED_LM_WORK_STATUS_V2,BUFFERED,"
+                       << (BufferedRealizedWorkLogger::Instance().HadFailure()?0:1)
+                       << ",0,0,"
+                       << (BufferedRealizedWorkLogger::Instance().HadFailure()?1:0)
+                       << '\n';
+        }
+        return;
+    }
+    if(mode==RealizedWorkCountOnly)
+    {
+        CountOnlyRealizedWorkStore &store=CountOnlyRealizedWorkStore::Instance();
+        bool exportOk=true;
+        const bool structurallyComplete=!store.Overflow() && !store.PathMismatch()
+            && store.Path()[0];
+        if(store.Path()[0])
+        {
+            for(std::size_t i=0;i<store.Size();++i)
+                exportOk=LogRealizedWorkInvocation(
+                    store.Path(),store.Records()[i],true) && exportOk;
+            std::ofstream status((std::string(store.Path())+".status.csv").c_str());
+            if(status)
+                status << "schema_version,mode,complete,fixed_store_overflow,"
+                          "path_mismatch,transport_failure\n"
+                       << "REALIZED_LM_WORK_STATUS_V2,COUNT_ONLY,"
+                       << ((structurallyComplete&&exportOk)?1:0) << ','
+                       << (store.Overflow()?1:0) << ','
+                       << (store.PathMismatch()?1:0) << ','
+                       << (exportOk?0:1) << '\n';
+        }
+        store.Clear();
+    }
+}
+
+/*
+ * @brief Local Bundle Adjustment
+ *
+ * 1. Vertex:
+ *     - g2o::VertexSE3Expmap()，LocalKeyFrames，即当前关键帧的位姿、与当前关键帧相连的关键帧的位姿
+ *     - g2o::VertexSE3Expmap()，FixedCameras，即能观测到LocalMapPoints的关键帧（并且不属于LocalKeyFrames）的位姿，在优化中这些关键帧的位姿不变
+ *     - g2o::VertexSBAPointXYZ()，LocalMapPoints，即LocalKeyFrames能观测到的所有MapPoints的位置
+ * 2. Edge:
+ *     - g2o::EdgeSE3ProjectXYZ()，BaseBinaryEdge
+ *         + Vertex：关键帧的Tcw，MapPoint的Pw
+ *         + measurement：MapPoint在关键帧中的二维位置(u,v)
+ *         + InfoMatrix: invSigma2(与特征点所在的尺度有关)
+ *     - g2o::EdgeStereoSE3ProjectXYZ()，BaseBinaryEdge
+ *         + Vertex：关键帧的Tcw，MapPoint的Pw
+ *         + measurement：MapPoint在关键帧中的二维位置(ul,v,ur)
+ *         + InfoMatrix: invSigma2(与特征点所在的尺度有关)
+ *         
+ * @param pKF        KeyFrame
+ * @param pbStopFlag 是否停止优化的标志
+ * @param pMap       在优化后，更新状态时需要用到Map的互斥量mMutexMapUpdate
+ * @note 由局部建图线程调用,对局部地图进行优化的函数
+ */
+void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap)
+{
+    // 该优化函数用于LocalMapping线程的局部BA优化
+
+    // Local KeyFrames: First Breadth Search from Current Keyframe
+    list<KeyFrame*> lLocalKeyFrames;
+
+    // Step 1 将当前关键帧及其共视关键帧加入lLocalKeyFrames
+    lLocalKeyFrames.push_back(pKF);
+    pKF->mnBALocalForKF = pKF->mnId;
+
+    // 找到关键帧连接的共视关键帧（一级相连），加入lLocalKeyFrames中
+    const vector<KeyFrame*> vNeighKFs = pKF->GetVectorCovisibleKeyFrames();
+    for(int i=0, iend=vNeighKFs.size(); i<iend; i++)
+    {
+        KeyFrame* pKFi = vNeighKFs[i];
+
+        // 把参与局部BA的每一个关键帧的 mnBALocalForKF设置为当前关键帧的mnId，防止重复添加
+        pKFi->mnBALocalForKF = pKF->mnId;
+
+        // 保证该关键帧有效才能加入
+        if(!pKFi->isBad())      
+            lLocalKeyFrames.push_back(pKFi);
+    }
+
+    // Local MapPoints seen in Local KeyFrames
+    // Step 2 遍历 lLocalKeyFrames 中(一级)关键帧，将它们观测的MapPoints加入到lLocalMapPoints
+    list<MapPoint*> lLocalMapPoints;
+    // 遍历 lLocalKeyFrames 中的每一个关键帧
+    for(list<KeyFrame*>::iterator lit=lLocalKeyFrames.begin() , lend=lLocalKeyFrames.end(); lit!=lend; lit++)
+    {
+        // 取出该关键帧对应的地图点
+        vector<MapPoint*> vpMPs = (*lit)->GetMapPointMatches();
+        // 遍历这个关键帧观测到的每一个地图点，加入到lLocalMapPoints
+        for(vector<MapPoint*>::iterator vit=vpMPs.begin(), vend=vpMPs.end(); vit!=vend; vit++)
+        {
+            MapPoint* pMP = *vit;
+            if(pMP)
+            {
+                if(!pMP->isBad())   //保证地图点有效
+                    // 把参与局部BA的每一个地图点的 mnBALocalForKF设置为当前关键帧的mnId
+                    // mnBALocalForKF 是为了防止重复添加
+                    if(pMP->mnBALocalForKF!=pKF->mnId)
+                    {
+                        lLocalMapPoints.push_back(pMP);
+                        pMP->mnBALocalForKF=pKF->mnId;
+                    }
+            }   // 判断这个地图点是否靠谱
+        } // 遍历这个关键帧观测到的每一个地图点
+    } // 遍历 lLocalKeyFrames 中的每一个关键帧
+
+    // Fixed Keyframes. Keyframes that see Local MapPoints but that are not Local Keyframes
+    // Step 3 得到能被局部MapPoints观测到，但不属于局部关键帧的(二级)关键帧，这些关键帧在局部BA优化时不优化
+    list<KeyFrame*> lFixedCameras;
+    // 遍历局部地图中的每个地图点
+    for(list<MapPoint*>::iterator lit=lLocalMapPoints.begin(), lend=lLocalMapPoints.end(); lit!=lend; lit++)
+    {
+        // 观测到该MapPoint的KF和该MapPoint在KF中的索引
+        map<KeyFrame*,size_t> observations = (*lit)->GetObservations();
+        // 遍历所有观测到该地图点的关键帧
+        for(map<KeyFrame*,size_t>::iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
+        {
+            KeyFrame* pKFi = mit->first;
+
+            // pKFi->mnBALocalForKF!=pKF->mnId 表示不属于局部关键帧，
+            // pKFi->mnBAFixedForKF!=pKF->mnId 表示还未标记为fixed（固定的）关键帧
+            if(pKFi->mnBALocalForKF!=pKF->mnId && pKFi->mnBAFixedForKF!=pKF->mnId)
+            {                
+                // 将局部地图点能观测到的、但是不属于局部BA范围的关键帧的mnBAFixedForKF标记为pKF（触发局部BA的当前关键帧）的mnId
+                pKFi->mnBAFixedForKF=pKF->mnId;
+                if(!pKFi->isBad())
+                    lFixedCameras.push_back(pKFi);
+            }
+        }
+    }
+
+    // Setup optimizer
+    // Step 4 构造g2o优化器，按照步骤来就行了
+    g2o::SparseOptimizer optimizer;
+    g2o::BlockSolver_6_3::LinearSolverType * linearSolver;
+
+    linearSolver = new g2o::LinearSolverEigen<g2o::BlockSolver_6_3::PoseMatrixType>();
+
+    g2o::BlockSolver_6_3 * solver_ptr = new g2o::BlockSolver_6_3(linearSolver);
+    // LM大法好
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+    optimizer.setAlgorithm(solver);
+
+    // 外界设置的停止优化标志
+    // 可能在 Tracking::NeedNewKeyFrame() 里置位
+    if(pbStopFlag)
+        optimizer.setForceStopFlag(pbStopFlag);
+
+    // 记录参与局部BA的最大关键帧mnId
+    unsigned long maxKFid = 0;
+
+    // Set Local KeyFrame vertices
+    // Step 5 添加待优化的位姿顶点：Pose of Local KeyFrame
+    for(list<KeyFrame*>::iterator lit=lLocalKeyFrames.begin(), lend=lLocalKeyFrames.end(); lit!=lend; lit++)
+    {
+        KeyFrame* pKFi = *lit;
+        g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
+        // 设置初始优化位姿
+        vSE3->setEstimate(Converter::toSE3Quat(pKFi->GetPose()));
+        vSE3->setId(pKFi->mnId);
+        // 如果是初始关键帧，要锁住位姿不优化
+        vSE3->setFixed(pKFi->mnId==0);
+        optimizer.addVertex(vSE3);
+        if(pKFi->mnId>maxKFid)
+            maxKFid=pKFi->mnId;
+    }
+
+    // Set Fixed KeyFrame vertices
+    // Step  6 添加不优化的位姿顶点：Pose of Fixed KeyFrame，注意这里调用了vSE3->setFixed(true)
+    // 不优化为啥也要添加？回答：为了增加约束信息
+    for(list<KeyFrame*>::iterator lit=lFixedCameras.begin(), lend=lFixedCameras.end(); lit!=lend; lit++)
+    {
+        KeyFrame* pKFi = *lit;
+        g2o::VertexSE3Expmap * vSE3 = new g2o::VertexSE3Expmap();
+        vSE3->setEstimate(Converter::toSE3Quat(pKFi->GetPose()));
+        vSE3->setId(pKFi->mnId);
+         // 所有的这些顶点的位姿都不优化，只是为了增加约束项
+        vSE3->setFixed(true);  
+        optimizer.addVertex(vSE3);
+        if(pKFi->mnId>maxKFid)
+            maxKFid=pKFi->mnId;
+    }
+
+    // Set MapPoint vertices
+    // Step  7 添加待优化的3D地图点顶点
+    // 边的数目 = pose数目 * 地图点数目
+    const int nExpectedSize = (lLocalKeyFrames.size()+lFixedCameras.size())*lLocalMapPoints.size();
+
+    vector<g2o::EdgeSE3ProjectXYZ*> vpEdgesMono;
+    vpEdgesMono.reserve(nExpectedSize);
+
+    vector<KeyFrame*> vpEdgeKFMono;
+    vpEdgeKFMono.reserve(nExpectedSize);
+
+    vector<MapPoint*> vpMapPointEdgeMono;
+    vpMapPointEdgeMono.reserve(nExpectedSize);
+
+    vector<g2o::EdgeStereoSE3ProjectXYZ*> vpEdgesStereo;
+    vpEdgesStereo.reserve(nExpectedSize);
+
+    vector<KeyFrame*> vpEdgeKFStereo;
+    vpEdgeKFStereo.reserve(nExpectedSize);
+
+    vector<MapPoint*> vpMapPointEdgeStereo;
+    vpMapPointEdgeStereo.reserve(nExpectedSize);
+
+    // 自由度为2的卡方分布，显著性水平为0.05，对应的临界阈值5.991
+    const float thHuberMono = sqrt(5.991);
+
+    // 自由度为3的卡方分布，显著性水平为0.05，对应的临界阈值7.815
+    const float thHuberStereo = sqrt(7.815);
+
+    // 遍历所有的局部地图中的地图点
+    for(list<MapPoint*>::iterator lit=lLocalMapPoints.begin(), lend=lLocalMapPoints.end(); lit!=lend; lit++)
+    {
+        // 添加顶点：MapPoint
+        MapPoint* pMP = *lit;
+        g2o::VertexSBAPointXYZ* vPoint = new g2o::VertexSBAPointXYZ();
+        vPoint->setEstimate(Converter::toVector3d(pMP->GetWorldPos()));
+        // 前面记录maxKFid的作用在这里体现
+        int id = pMP->mnId+maxKFid+1;
+        vPoint->setId(id);
+        // 因为使用了LinearSolverType，所以需要将所有的三维点边缘化掉
+        vPoint->setMarginalized(true);  
+        optimizer.addVertex(vPoint);
+
+        // 观测到该地图点的KF和该地图点在KF中的索引
+        const map<KeyFrame*,size_t> observations = pMP->GetObservations();
+
+        // Set edges
+        // Step 8 在添加完了一个地图点之后, 对每一对关联的MapPoint和KeyFrame构建边
+        // 遍历所有观测到当前地图点的关键帧
+        for(map<KeyFrame*,size_t>::const_iterator mit=observations.begin(), mend=observations.end(); mit!=mend; mit++)
+        {
+            KeyFrame* pKFi = mit->first;
+
+            if(!pKFi->isBad())
+            {                
+                const cv::KeyPoint &kpUn = pKFi->mvKeysUn[mit->second];
+                // 根据单目/双目两种不同的输入构造不同的误差边
+                // Monocular observation
+                // 单目模式下
+                if(pKFi->mvuRight[mit->second]<0)
+                {
+                    Eigen::Matrix<double,2,1> obs;
+                    obs << kpUn.pt.x, kpUn.pt.y;
+
+                    g2o::EdgeSE3ProjectXYZ* e = new g2o::EdgeSE3ProjectXYZ();
+
+                    e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
+                    e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId)));
+                    e->setMeasurement(obs);
+                    // 权重为特征点所在图像金字塔的层数的倒数
+                    const float &invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    e->setInformation(Eigen::Matrix2d::Identity()*invSigma2);
+
+                    // 使用鲁棒核函数抑制外点
+                    g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
+                    e->setRobustKernel(rk);
+                    rk->setDelta(thHuberMono);
+
+                    e->fx = pKFi->fx;
+                    e->fy = pKFi->fy;
+                    e->cx = pKFi->cx;
+                    e->cy = pKFi->cy;
+
+                    optimizer.addEdge(e);
+                    vpEdgesMono.push_back(e);
+                    vpEdgeKFMono.push_back(pKFi);
+                    vpMapPointEdgeMono.push_back(pMP);
+                }
+                else // Stereo observation
+                {
+                    Eigen::Matrix<double,3,1> obs;
+                    const float kp_ur = pKFi->mvuRight[mit->second];
+                    obs << kpUn.pt.x, kpUn.pt.y, kp_ur;
+
+                    g2o::EdgeStereoSE3ProjectXYZ* e = new g2o::EdgeStereoSE3ProjectXYZ();
+
+                    e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id)));
+                    e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFi->mnId)));
+                    e->setMeasurement(obs);
+                    const float &invSigma2 = pKFi->mvInvLevelSigma2[kpUn.octave];
+                    Eigen::Matrix3d Info = Eigen::Matrix3d::Identity()*invSigma2;
+                    e->setInformation(Info);
+
+                    g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
+                    e->setRobustKernel(rk);
+                    rk->setDelta(thHuberStereo);
+
+                    e->fx = pKFi->fx;
+                    e->fy = pKFi->fy;
+                    e->cx = pKFi->cx;
+                    e->cy = pKFi->cy;
+                    e->bf = pKFi->mbf;
+
+                    optimizer.addEdge(e);
+                    vpEdgesStereo.push_back(e);
+                    vpEdgeKFStereo.push_back(pKFi);
+                    vpMapPointEdgeStereo.push_back(pMP);
+                } 
+            } 
+        } // 遍历所有观测到当前地图点的关键帧
+    } // 遍历所有的局部地图中的地图点
+
+    // 开始BA前再次确认是否有外部请求停止优化，因为这个变量是引用传递，会随外部变化
+    // 可能在 Tracking::NeedNewKeyFrame(), mpLocalMapper->InsertKeyFrame 里置位
+    if(pbStopFlag)
+        if(*pbStopFlag)
+            return;
+
+    // Step 9 开始优化。分成两个阶段
+    // 第一阶段优化
+    optimizer.initializeOptimization();
+    // 迭代5次
+    optimizer.optimize(5);  
+
+    bool bDoMore= true;
+
+    // 检查是否外部请求停止
+    if(pbStopFlag)
+        if(*pbStopFlag)
+            bDoMore = false;
+
+    // 如果有外部请求停止,那么就不在进行第二阶段的优化
+    if(bDoMore)
+    {
+        // Check inlier observations
+        // Step 10 检测outlier，并设置下次不优化
+        // 遍历所有的单目误差边
+        for(size_t i=0, iend=vpEdgesMono.size(); i<iend;i++)
+        {
+            g2o::EdgeSE3ProjectXYZ* e = vpEdgesMono[i];
+            MapPoint* pMP = vpMapPointEdgeMono[i];
+
+            if(pMP->isBad())
+                continue;
+
+            // 基于卡方检验计算出的阈值（假设测量有一个像素的偏差）
+            // 自由度为2的卡方分布，显著性水平为0.05，对应的临界阈值5.991
+            // 如果 当前边误差超出阈值，或者边链接的地图点深度值为负，说明这个边有问题，不优化了。
+            if(e->chi2()>5.991 || !e->isDepthPositive())
+            {
+                // 不优化
+                e->setLevel(1);
+            }
+            // 第二阶段优化的时候就属于精求解了,所以就不使用核函数
+            e->setRobustKernel(0);
+        }
+
+        // 对于所有的双目的误差边也都进行类似的操作
+        for(size_t i=0, iend=vpEdgesStereo.size(); i<iend;i++)
+        {
+            g2o::EdgeStereoSE3ProjectXYZ* e = vpEdgesStereo[i];
+            MapPoint* pMP = vpMapPointEdgeStereo[i];
+
+            if(pMP->isBad())
+                continue;
+            // 自由度为3的卡方分布，显著性水平为0.05，对应的临界阈值7.815
+            if(e->chi2()>7.815 || !e->isDepthPositive())
+            {
+                e->setLevel(1);
+            }
+
+            e->setRobustKernel(0);
+        }
+
+        // Optimize again without the outliers
+        // Step 11：排除误差较大的outlier后再次优化 -- 第二阶段优化
+        optimizer.initializeOptimization(0);
+        optimizer.optimize(10);
+
+    }
+
+    vector<pair<KeyFrame*,MapPoint*> > vToErase;
+    vToErase.reserve(vpEdgesMono.size()+vpEdgesStereo.size());
+
+    // Check inlier observations
+    // Step 12：在优化后重新计算误差，剔除连接误差比较大的关键帧和MapPoint
+    // 对于单目误差边
+    for(size_t i=0, iend=vpEdgesMono.size(); i<iend;i++)
+    {
+        g2o::EdgeSE3ProjectXYZ* e = vpEdgesMono[i];
+        MapPoint* pMP = vpMapPointEdgeMono[i];
+
+        if(pMP->isBad())
+            continue;
+
+        // 基于卡方检验计算出的阈值（假设测量有一个像素的偏差）
+        // 自由度为2的卡方分布，显著性水平为0.05，对应的临界阈值5.991
+        // 如果 当前边误差超出阈值，或者边链接的地图点深度值为负，说明这个边有问题，要删掉了
+        if(e->chi2()>5.991 || !e->isDepthPositive())
+        {
+            // outlier
+            KeyFrame* pKFi = vpEdgeKFMono[i];
+            vToErase.push_back(make_pair(pKFi,pMP));
+        }
+    }
+
+    // 双目误差边
+    for(size_t i=0, iend=vpEdgesStereo.size(); i<iend;i++)
+    {
+        g2o::EdgeStereoSE3ProjectXYZ* e = vpEdgesStereo[i];
+        MapPoint* pMP = vpMapPointEdgeStereo[i];
+
+        if(pMP->isBad())
+            continue;
+
+        if(e->chi2()>7.815 || !e->isDepthPositive())
+        {
+            KeyFrame* pKFi = vpEdgeKFStereo[i];
+            vToErase.push_back(make_pair(pKFi,pMP));
+        }
+    }
+
+    // Get Map Mutex
+    unique_lock<mutex> lock(pMap->mMutexMapUpdate);
+
+    // 删除点
+    // 连接偏差比较大，在关键帧中剔除对该地图点的观测
+    // 连接偏差比较大，在地图点中剔除对该关键帧的观测
+    if(!vToErase.empty())
+    {
+        for(size_t i=0;i<vToErase.size();i++)
+        {
+            KeyFrame* pKFi = vToErase[i].first;
+            MapPoint* pMPi = vToErase[i].second;
+            pKFi->EraseMapPointMatch(pMPi);
+            pMPi->EraseObservation(pKFi);
+        }
+    }
+
+    // Recover optimized data
+    // Step 13：优化后更新关键帧位姿以及地图点的位置、平均观测方向等属性
+
+    //Keyframes
+    for(list<KeyFrame*>::iterator lit=lLocalKeyFrames.begin(), lend=lLocalKeyFrames.end(); lit!=lend; lit++)
+    {
+        KeyFrame* pKF = *lit;
+        g2o::VertexSE3Expmap* vSE3 = static_cast<g2o::VertexSE3Expmap*>(optimizer.vertex(pKF->mnId));
+        g2o::SE3Quat SE3quat = vSE3->estimate();
+        pKF->SetPose(Converter::toCvMat(SE3quat));
+    }
+
+    //Points
+    for(list<MapPoint*>::iterator lit=lLocalMapPoints.begin(), lend=lLocalMapPoints.end(); lit!=lend; lit++)
+    {
+        MapPoint* pMP = *lit;
+        g2o::VertexSBAPointXYZ* vPoint = static_cast<g2o::VertexSBAPointXYZ*>(optimizer.vertex(pMP->mnId+maxKFid+1));
+        pMP->SetWorldPos(Converter::toCvMat(vPoint->estimate()));
+        pMP->UpdateNormalAndDepth();
+    }
+}
+
+/**
+ * @brief 闭环检测后，EssentialGraph优化，仅优化所有关键帧位姿，不优化地图点
+ *
+ * 1. Vertex:
+ *     - g2o::VertexSim3Expmap，Essential graph中关键帧的位姿
+ * 2. Edge:
+ *     - g2o::EdgeSim3()，BaseBinaryEdge
+ *         + Vertex：关键帧的Tcw，MapPoint的Pw
+ *         + measurement：经过CorrectLoop函数步骤2，Sim3传播校正后的位姿
+ *         + InfoMatrix: 单位矩阵     
+ *
+ * @param pMap               全局地图
+ * @param pLoopKF            闭环匹配上的关键帧
+ * @param pCurKF             当前关键帧
+ * @param NonCorrectedSim3   未经过Sim3传播调整过的关键帧位姿
+ * @param CorrectedSim3      经过Sim3传播调整过的关键帧位姿
+ * @param LoopConnections    因闭环时地图点调整而新生成的边
+ */
+void Optimizer::OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* pCurKF,
+                                       const LoopClosing::KeyFrameAndPose &NonCorrectedSim3,
+                                       const LoopClosing::KeyFrameAndPose &CorrectedSim3,
+                                       const map<KeyFrame *, set<KeyFrame *> > &LoopConnections, const bool &bFixScale)
+{
+    // Setup optimizer
+    // Step 1：构造优化器
+    g2o::SparseOptimizer optimizer;
+    optimizer.setVerbose(false);
+    // 指定线性方程求解器使用Eigen的块求解器
+    g2o::BlockSolver_7_3::LinearSolverType * linearSolver =
+           new g2o::LinearSolverEigen<g2o::BlockSolver_7_3::PoseMatrixType>();
+    // 构造线性求解器
+    g2o::BlockSolver_7_3 * solver_ptr= new g2o::BlockSolver_7_3(linearSolver);
+    // 使用LM算法进行非线性迭代
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+
+    // 第一次迭代的初始lambda值，如未指定会自动计算一个合适的值
+    solver->setUserLambdaInit(1e-16);
+    optimizer.setAlgorithm(solver);
+
+    // 获取当前地图中的所有关键帧 和地图点
+    const vector<KeyFrame*> vpKFs = pMap->GetAllKeyFrames();
+    const vector<MapPoint*> vpMPs = pMap->GetAllMapPoints();
+
+    // 最大关键帧id，用于添加顶点时使用
+    const unsigned int nMaxKFid = pMap->GetMaxKFid();
+
+    // 记录所有优化前关键帧的位姿，优先使用在闭环时通过Sim3传播调整过的Sim3位姿
+    vector<g2o::Sim3,Eigen::aligned_allocator<g2o::Sim3> > vScw(nMaxKFid+1);
+    // 记录所有关键帧经过本次本质图优化过的位姿
+    vector<g2o::Sim3,Eigen::aligned_allocator<g2o::Sim3> > vCorrectedSwc(nMaxKFid+1);
+    // 这个变量没有用
+    vector<g2o::VertexSim3Expmap*> vpVertices(nMaxKFid+1);
+
+    // 两个关键帧之间共视关系的权重（也就是共视点的数目，单目x1，双目/rgbd x2）的最小值
+    const int minFeat = 100;
+
+    // Set KeyFrame vertices
+    // Step 2：将地图中所有关键帧的pose作为顶点添加到优化器
+    // 尽可能使用经过Sim3调整的位姿
+    // 遍历全局地图中的所有的关键帧
+    for(size_t i=0, iend=vpKFs.size(); i<iend;i++)
+    {
+        KeyFrame* pKF = vpKFs[i];
+        if(pKF->isBad())
+            continue;
+        g2o::VertexSim3Expmap* VSim3 = new g2o::VertexSim3Expmap();
+        // 关键帧在所有关键帧中的id，用来设置为顶点的id
+        const int nIDi = pKF->mnId;
+
+        LoopClosing::KeyFrameAndPose::const_iterator it = CorrectedSim3.find(pKF);
+
+        if(it!=CorrectedSim3.end())
+        {
+            // 如果该关键帧在闭环时通过Sim3传播调整过，优先用调整后的Sim3位姿
+            vScw[nIDi] = it->second;
+            VSim3->setEstimate(it->second);
+        }
+        else
+        {
+            // 如果该关键帧在闭环时没有通过Sim3传播调整过，用跟踪时的位姿
+            Eigen::Matrix<double,3,3> Rcw = Converter::toMatrix3d(pKF->GetRotation());
+            Eigen::Matrix<double,3,1> tcw = Converter::toVector3d(pKF->GetTranslation());
+            g2o::Sim3 Siw(Rcw,tcw,1.0); //尺度为1
+            vScw[nIDi] = Siw;
+            VSim3->setEstimate(Siw);
+        }
+
+        // 闭环匹配上的帧不进行位姿优化（认为是准确的，作为基准）
+        // 注意这里并没有锁住第0个关键帧，所以初始关键帧位姿也做了优化
+        if(pKF==pLoopKF)
+            VSim3->setFixed(true);
+
+        VSim3->setId(nIDi);
+        VSim3->setMarginalized(false);
+        // 和当前系统的传感器有关，如果是RGBD或者是双目，那么就不需要优化sim3的缩放系数，保持为1即可
+        VSim3->_fix_scale = bFixScale;
+
+        optimizer.addVertex(VSim3);
+
+        // 优化前的pose顶点，后面代码中没有使用
+        vpVertices[nIDi]=VSim3;
+    }
+
+
+    // 保存由于闭环后优化sim3而出现的新的关键帧和关键帧之间的连接关系,其中id比较小的关键帧在前,id比较大的关键帧在后
+    set<pair<long unsigned int,long unsigned int> > sInsertedEdges;
+
+    const Eigen::Matrix<double,7,7> matLambda = Eigen::Matrix<double,7,7>::Identity();
+
+    // Set Loop edges
+    // Step 3：添加第1种边：LoopConnections是闭环时因为地图点调整而出现的新关键帧连接关系
+    for(map<KeyFrame *, set<KeyFrame *> >::const_iterator mit = LoopConnections.begin(), mend=LoopConnections.end(); mit!=mend; mit++)
+    {
+        KeyFrame* pKF = mit->first;
+        const long unsigned int nIDi = pKF->mnId;
+        // 和pKF 有连接关系的关键帧
+        const set<KeyFrame*> &spConnections = mit->second;
+        const g2o::Sim3 Siw = vScw[nIDi];
+        const g2o::Sim3 Swi = Siw.inverse();
+
+        // 对于当前关键帧nIDi而言，遍历每一个新添加的关键帧nIDj链接关系
+        for(set<KeyFrame*>::const_iterator sit=spConnections.begin(), send=spConnections.end(); sit!=send; sit++)
+        {
+            const long unsigned int nIDj = (*sit)->mnId;
+            // 条件1：至少有一个不是pCurKF或pLoopKF
+            // 条件2：共视程度太少(<100),不足以构成约束的边
+            if((nIDi!=pCurKF->mnId || nIDj!=pLoopKF->mnId)   
+                    && pKF->GetWeight(*sit)<minFeat)       
+                continue;
+
+            // 通过上面考验的帧有两种情况：
+            // 1、恰好是当前帧及其闭环帧 nIDi=pCurKF 并且nIDj=pLoopKF（此时忽略共视程度）；2、 任意两对，共视程度大于100
+            const g2o::Sim3 Sjw = vScw[nIDj];
+            // 得到两个pose间的Sim3变换
+            const g2o::Sim3 Sji = Sjw * Swi;
+
+            g2o::EdgeSim3* e = new g2o::EdgeSim3();
+            e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(nIDj)));
+            e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(nIDi)));
+            // Sji内部是经过了Sim调整的观测
+            e->setMeasurement(Sji);
+
+            // 信息矩阵是单位阵,说明这类新增加的边对总误差的贡献也都是一样大的
+            e->information() = matLambda;
+
+            optimizer.addEdge(e);
+
+            // 保证id小的在前,大的在后
+            sInsertedEdges.insert(make_pair(min(nIDi,nIDj),max(nIDi,nIDj)));
+        } // 对于当前关键帧nIDi而言，遍历每一个新添加的关键帧nIDj链接关系
+    }// 遍历所有添加了新的共视关系的关键帧
+
+    // Set normal edges
+    // Step 4：添加跟踪时形成的边、闭环匹配成功形成的边
+    for(size_t i=0, iend=vpKFs.size(); i<iend; i++)
+    {
+        KeyFrame* pKF = vpKFs[i];
+
+        const int nIDi = pKF->mnId;
+
+        g2o::Sim3 Swi;
+
+        LoopClosing::KeyFrameAndPose::const_iterator iti = NonCorrectedSim3.find(pKF);
+
+        if(iti!=NonCorrectedSim3.end())
+            Swi = (iti->second).inverse();  //优先使用未经过Sim3传播调整的位姿
+        else
+            Swi = vScw[nIDi].inverse();     //没找到才考虑已经经过Sim3传播调整的位姿
+
+        KeyFrame* pParentKF = pKF->GetParent();
+
+        // Spanning tree edge
+        // Step 4.1：添加第2种边：扩展树的边（有父关键帧）
+        // 父关键帧就是和当前帧共视程度最高的关键帧
+        if(pParentKF)
+        {
+            int nIDj = pParentKF->mnId;
+
+            g2o::Sim3 Sjw;
+
+            LoopClosing::KeyFrameAndPose::const_iterator itj = NonCorrectedSim3.find(pParentKF);
+
+            //优先使用未经过Sim3传播调整的位姿
+            if(itj!=NonCorrectedSim3.end())
+                Sjw = itj->second;
+            else
+                Sjw = vScw[nIDj];
+
+            // 计算父子关键帧之间的相对位姿
+            g2o::Sim3 Sji = Sjw * Swi;
+
+            g2o::EdgeSim3* e = new g2o::EdgeSim3();
+            e->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(nIDj)));
+            e->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(nIDi)));
+            // 希望父子关键帧之间的位姿差最小
+            e->setMeasurement(Sji);
+            // 所有元素的贡献都一样;每个误差边对总误差的贡献也都相同
+            e->information() = matLambda;
+            optimizer.addEdge(e);
+        }
+
+        // Loop edges
+        // Step 4.2：添加第3种边：当前帧与闭环匹配帧之间的连接关系(这里面也包括了当前遍历到的这个关键帧之前曾经存在过的回环边)
+        // 获取和当前关键帧形成闭环关系的关键帧
+        const set<KeyFrame*> sLoopEdges = pKF->GetLoopEdges();
+        for(set<KeyFrame*>::const_iterator sit=sLoopEdges.begin(), send=sLoopEdges.end(); sit!=send; sit++)
+        {
+            KeyFrame* pLKF = *sit;
+            // 注意这里控制了要比当前遍历到的这个关键帧的id要小,这个也是为了避免重复添加
+            if(pLKF->mnId<pKF->mnId)
+            {
+                g2o::Sim3 Slw;
+
+                LoopClosing::KeyFrameAndPose::const_iterator itl = NonCorrectedSim3.find(pLKF);
+
+                //优先使用未经过Sim3传播调整的位姿
+                if(itl!=NonCorrectedSim3.end())
+                    Slw = itl->second;
+                else
+                    Slw = vScw[pLKF->mnId];
+
+                g2o::Sim3 Sli = Slw * Swi;
+                g2o::EdgeSim3* el = new g2o::EdgeSim3();
+                el->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pLKF->mnId)));
+                el->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(nIDi)));
+                // 根据两个Pose顶点的位姿算出相对位姿作为边
+                el->setMeasurement(Sli);
+                el->information() = matLambda;
+                optimizer.addEdge(el);
+            }
+        }
+
+        // Covisibility graph edges
+        // Step 4.3：添加第4种边：有很高(>=100)共视关系的关键帧也作为边进行优化
+        // 优先使用经过Sim3调整前关键帧之间的相对关系作为边
+        const vector<KeyFrame*> vpConnectedKFs = pKF->GetCovisiblesByWeight(minFeat);
+        for(vector<KeyFrame*>::const_iterator vit=vpConnectedKFs.begin(); vit!=vpConnectedKFs.end(); vit++)
+        {
+            KeyFrame* pKFn = *vit;
+            // 避免重复添加的情况:最小生成树中的父子关键帧关系,以及和当前遍历到的关键帧构成了回环关系
+            if(pKFn && pKFn!=pParentKF && !pKF->hasChild(pKFn) && !sLoopEdges.count(pKFn)) 
+            {
+                // 注意这里控制了要比当前遍历到的这个关键帧的id要小,这个也是为了避免重复添加
+                if(!pKFn->isBad() && pKFn->mnId<pKF->mnId)
+                {
+                    // 判断是不是这条边之前已经添加进去了
+                    if(sInsertedEdges.count(make_pair(min(pKF->mnId,pKFn->mnId),max(pKF->mnId,pKFn->mnId))))
+                        continue;
+
+                    g2o::Sim3 Snw;
+
+                    LoopClosing::KeyFrameAndPose::const_iterator itn = NonCorrectedSim3.find(pKFn);
+
+                    // 优先未经过Sim3传播调整的位姿
+                    if(itn!=NonCorrectedSim3.end())
+                        Snw = itn->second;
+                    else
+                        Snw = vScw[pKFn->mnId];
+
+                    // 也是同样计算相对位姿
+                    g2o::Sim3 Sni = Snw * Swi;
+
+                    g2o::EdgeSim3* en = new g2o::EdgeSim3();
+                    en->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(pKFn->mnId)));
+                    en->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(nIDi)));
+                    en->setMeasurement(Sni);
+                    en->information() = matLambda;
+                    optimizer.addEdge(en);
+                }
+            } // 如果这个比较好的共视关系的约束之前没有被重复添加过
+        } // 遍历所有于当前遍历到的关键帧具有较好的共视关系的关键帧
+    } // 添加跟踪时形成的边、闭环匹配成功形成的边
+
+    // Optimize!
+    // Step 5：开始g2o优化
+    optimizer.initializeOptimization();
+    optimizer.optimize(20);
+
+    // 更新地图前，先上锁，防止冲突
+    unique_lock<mutex> lock(pMap->mMutexMapUpdate);
+
+    // SE3 Pose Recovering. Sim3:[sR t;0 1] -> SE3:[R t/s;0 1]
+    // Step 6：设定优化后的位姿
+    // 遍历地图中的所有关键帧
+    for(size_t i=0;i<vpKFs.size();i++)
+    {
+        KeyFrame* pKFi = vpKFs[i];
+
+        const int nIDi = pKFi->mnId;
+
+        g2o::VertexSim3Expmap* VSim3 = static_cast<g2o::VertexSim3Expmap*>(optimizer.vertex(nIDi));
+        g2o::Sim3 CorrectedSiw =  VSim3->estimate();
+        vCorrectedSwc[nIDi]=CorrectedSiw.inverse();
+        Eigen::Matrix3d eigR = CorrectedSiw.rotation().toRotationMatrix();
+        Eigen::Vector3d eigt = CorrectedSiw.translation();
+        double s = CorrectedSiw.scale();
+
+        // 转换成尺度为1的变换矩阵的形式
+        eigt *=(1./s); //[R t/s;0 1]
+
+        cv::Mat Tiw = Converter::toCvSE3(eigR,eigt);
+
+        // 注意这里的位姿是直接写入到关键帧中的
+        pKFi->SetPose(Tiw);
+    }
+
+    // Correct points. Transform to "non-optimized" reference keyframe pose and transform back with optimized pose
+    // Step 7：步骤5和步骤6优化得到关键帧的位姿后，地图点根据参考帧优化前后的相对关系调整自己的位置
+    // 遍历所有地图点
+    for(size_t i=0, iend=vpMPs.size(); i<iend; i++)
+    {
+        MapPoint* pMP = vpMPs[i];
+
+        if(pMP->isBad())
+            continue;
+
+        int nIDr;
+        // 该地图点在闭环检测中被当前KF调整过，那么使用调整它的KF id
+        if(pMP->mnCorrectedByKF==pCurKF->mnId)
+        {
+            nIDr = pMP->mnCorrectedReference;
+        }
+        else
+        {
+            // 通常情况下地图点的参考关键帧就是创建该地图点的那个关键帧
+            KeyFrame* pRefKF = pMP->GetReferenceKeyFrame();
+            nIDr = pRefKF->mnId;
+        }
+
+        // 得到地图点参考关键帧优化前的位姿
+        g2o::Sim3 Srw = vScw[nIDr];
+        // 得到地图点参考关键帧优化后的位姿
+        g2o::Sim3 correctedSwr = vCorrectedSwc[nIDr];
+
+        cv::Mat P3Dw = pMP->GetWorldPos();
+        Eigen::Matrix<double,3,1> eigP3Dw = Converter::toVector3d(P3Dw);
+        Eigen::Matrix<double,3,1> eigCorrectedP3Dw = correctedSwr.map(Srw.map(eigP3Dw));
+
+        cv::Mat cvCorrectedP3Dw = Converter::toCvMat(eigCorrectedP3Dw);
+        // 这里优化后的位置也是直接写入到地图点之中的
+        pMP->SetWorldPos(cvCorrectedP3Dw);
+        // 记得更新一下
+        pMP->UpdateNormalAndDepth();
+    } // 使用相对位姿变换的方法来更新地图点的位姿
+}
+
+
+/**
+ * @brief 形成闭环时固定（不优化）地图点进行Sim3优化
+ * 1. Vertex:
+ *     - g2o::VertexSim3Expmap()，两个关键帧的位姿
+ *     - g2o::VertexSBAPointXYZ()，两个关键帧共有的MapPoints
+ * 2. Edge:
+ *     - g2o::EdgeSim3ProjectXYZ()，BaseBinaryEdge
+ *         + Vertex：关键帧的Sim3，MapPoint的Pw
+ *         + measurement：MapPoint在关键帧中的二维位置(u,v)
+ *         + InfoMatrix: invSigma2(与特征点所在的尺度有关)
+ *     - g2o::EdgeInverseSim3ProjectXYZ()，BaseBinaryEdge
+ *         + Vertex：关键帧的Sim3，MapPoint的Pw
+ *         + measurement：MapPoint在关键帧中的二维位置(u,v)
+ *         + InfoMatrix: invSigma2(与特征点所在的尺度有关)
+ * 
+ * @param[in] pKF1              当前帧
+ * @param[in] pKF2              闭环候选帧
+ * @param[in] vpMatches1        两个关键帧之间的匹配关系
+ * @param[in] g2oS12            两个关键帧间的Sim3变换，方向是从2到1       
+ * @param[in] th2               卡方检验是否为误差边用到的阈值
+ * @param[in] bFixScale         是否优化尺度，单目进行尺度优化，双目/RGB-D不进行尺度优化
+ * @return int                  优化之后匹配点中内点的个数
+ */
+int Optimizer::OptimizeSim3(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &vpMatches1, g2o::Sim3 &g2oS12, const float th2, const bool bFixScale)
+{
+    // Step 1：初始化g2o优化器
+    // 先构造求解器
+    g2o::SparseOptimizer optimizer;
+    // 构造线性方程求解器，Hx = -b的求解器
+    g2o::BlockSolverX::LinearSolverType * linearSolver;
+    // 使用dense的求解器，（常见非dense求解器有cholmod线性求解器和shur补线性求解器）
+    linearSolver = new g2o::LinearSolverDense<g2o::BlockSolverX::PoseMatrixType>();
+    g2o::BlockSolverX * solver_ptr = new g2o::BlockSolverX(linearSolver);
+    // 使用L-M迭代
+    g2o::OptimizationAlgorithmLevenberg* solver = new g2o::OptimizationAlgorithmLevenberg(solver_ptr);
+    optimizer.setAlgorithm(solver);
+
+    // Calibration
+    // 内参矩阵
+    const cv::Mat &K1 = pKF1->mK;
+    const cv::Mat &K2 = pKF2->mK;
+
+    // Camera poses
+    const cv::Mat R1w = pKF1->GetRotation();
+    const cv::Mat t1w = pKF1->GetTranslation();
+    const cv::Mat R2w = pKF2->GetRotation();
+    const cv::Mat t2w = pKF2->GetTranslation();
+
+    // Set Sim3 vertex
+    // Step 2: 设置Sim3 作为顶点
+    g2o::VertexSim3Expmap * vSim3 = new g2o::VertexSim3Expmap();    
+    // 根据传感器类型决定是否固定尺度
+    vSim3->_fix_scale=bFixScale;
+    vSim3->setEstimate(g2oS12);
+    vSim3->setId(0);
+    // Sim3 需要优化
+    vSim3->setFixed(false);                             // 因为要优化Sim3顶点，所以设置为false
+    vSim3->_principle_point1[0] = K1.at<float>(0,2);    // 光心横坐标cx
+    vSim3->_principle_point1[1] = K1.at<float>(1,2);    // 光心纵坐标cy
+    vSim3->_focal_length1[0] = K1.at<float>(0,0);       // 焦距 fx
+    vSim3->_focal_length1[1] = K1.at<float>(1,1);       // 焦距 fy
+    vSim3->_principle_point2[0] = K2.at<float>(0,2);
+    vSim3->_principle_point2[1] = K2.at<float>(1,2);
+    vSim3->_focal_length2[0] = K2.at<float>(0,0);
+    vSim3->_focal_length2[1] = K2.at<float>(1,1);
+    optimizer.addVertex(vSim3);
+
+    // Set MapPoint vertices
+    // Step 3: 设置地图点作为顶点
+    const int N = vpMatches1.size();
+    // 获取pKF1的地图点
+    const vector<MapPoint*> vpMapPoints1 = pKF1->GetMapPointMatches();
+
+    vector<g2o::EdgeSim3ProjectXYZ*> vpEdges12;         //pKF2对应的地图点到pKF1的投影边
+    vector<g2o::EdgeInverseSim3ProjectXYZ*> vpEdges21;  //pKF1对应的地图点到pKF2的投影边
+    vector<size_t> vnIndexEdge;                         //边的索引
+
+    vnIndexEdge.reserve(2*N);
+    vpEdges12.reserve(2*N);
+    vpEdges21.reserve(2*N);
+
+    // 核函数的阈值
+    const float deltaHuber = sqrt(th2);
+
+    int nCorrespondences = 0;
+
+    // 遍历每对匹配点
+    for(int i=0; i<N; i++)
+    {
+        if(!vpMatches1[i])
+            continue;
+
+        // pMP1和pMP2是匹配的地图点
+        MapPoint* pMP1 = vpMapPoints1[i];
+        MapPoint* pMP2 = vpMatches1[i];
+
+        // 保证顶点的id能够错开
+        const int id1 = 2*i+1;
+        const int id2 = 2*(i+1);
+
+        // i2 是 pMP2 在pKF2中对应的索引
+        const int i2 = pMP2->GetIndexInKeyFrame(pKF2);
+
+        if(pMP1 && pMP2)
+        {
+            if(!pMP1->isBad() && !pMP2->isBad() && i2>=0)
+            {
+                // 如果这对匹配点都靠谱，并且对应的2D特征点也都存在的话，添加PointXYZ顶点
+                g2o::VertexSBAPointXYZ* vPoint1 = new g2o::VertexSBAPointXYZ();
+                // 地图点转换到各自相机坐标系下的三维点
+                cv::Mat P3D1w = pMP1->GetWorldPos();
+                cv::Mat P3D1c = R1w*P3D1w + t1w;
+                vPoint1->setEstimate(Converter::toVector3d(P3D1c));
+                vPoint1->setId(id1);
+                // 地图点不优化
+                vPoint1->setFixed(true);
+                optimizer.addVertex(vPoint1);
+
+                g2o::VertexSBAPointXYZ* vPoint2 = new g2o::VertexSBAPointXYZ();
+                cv::Mat P3D2w = pMP2->GetWorldPos();
+                cv::Mat P3D2c = R2w*P3D2w + t2w;
+                vPoint2->setEstimate(Converter::toVector3d(P3D2c));
+                vPoint2->setId(id2);
+                vPoint2->setFixed(true);
+                optimizer.addVertex(vPoint2);
+            }
+            else
+                continue;
+        }
+        else
+            continue;
+
+        // 对匹配关系进行计数
+        nCorrespondences++;
+
+        // Step 4: 添加边（地图点投影到特征点）
+        // Set edge x1 = S12*X2
+
+        // 地图点pMP1对应的观测特征点
+        Eigen::Matrix<double,2,1> obs1;
+        const cv::KeyPoint &kpUn1 = pKF1->mvKeysUn[i];
+        obs1 << kpUn1.pt.x, kpUn1.pt.y;
+
+        // Step 4.1 闭环候选帧地图点投影到当前帧的边 -- 正向投影
+        g2o::EdgeSim3ProjectXYZ* e12 = new g2o::EdgeSim3ProjectXYZ();
+        // vertex(id2)对应的是pKF2 VertexSBAPointXYZ 类型的三维点
+        e12->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id2)));
+        // ? 为什么这里添加的节点的id为0？
+        // 回答：因为vertex(0)对应的是 VertexSim3Expmap 类型的待优化Sim3，其id 为 0
+        e12->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
+        e12->setMeasurement(obs1);
+        // 信息矩阵和这个特征点的可靠程度（在图像金字塔中的图层）有关
+        const float &invSigmaSquare1 = pKF1->mvInvLevelSigma2[kpUn1.octave];
+        e12->setInformation(Eigen::Matrix2d::Identity()*invSigmaSquare1);
+
+        // 使用鲁棒核函数
+        g2o::RobustKernelHuber* rk1 = new g2o::RobustKernelHuber;
+        e12->setRobustKernel(rk1);
+        rk1->setDelta(deltaHuber);
+        optimizer.addEdge(e12);
+
+        // Set edge x2 = S21*X1
+        // Step 4.2 当前帧地图点投影到闭环候选帧的边 -- 反向投影
+
+        // 地图点pMP2对应的观测特征点
+        Eigen::Matrix<double,2,1> obs2;
+        const cv::KeyPoint &kpUn2 = pKF2->mvKeysUn[i2];
+        obs2 << kpUn2.pt.x, kpUn2.pt.y;
+
+        g2o::EdgeInverseSim3ProjectXYZ* e21 = new g2o::EdgeInverseSim3ProjectXYZ();
+        // vertex(id1)对应的是pKF1 VertexSBAPointXYZ 类型的三维点，内部误差公式也不同
+        e21->setVertex(0, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(id1)));
+        e21->setVertex(1, dynamic_cast<g2o::OptimizableGraph::Vertex*>(optimizer.vertex(0)));
+        e21->setMeasurement(obs2);
+        float invSigmaSquare2 = pKF2->mvInvLevelSigma2[kpUn2.octave];
+        e21->setInformation(Eigen::Matrix2d::Identity()*invSigmaSquare2);
+        g2o::RobustKernelHuber* rk2 = new g2o::RobustKernelHuber;
+        e21->setRobustKernel(rk2);
+        rk2->setDelta(deltaHuber);
+        optimizer.addEdge(e21);
+
+        vpEdges12.push_back(e12);
+        vpEdges21.push_back(e21);
+        vnIndexEdge.push_back(i);
+    }
+
+    // Optimize!
+    // Step 5：g2o开始优化，先迭代5次
+    optimizer.initializeOptimization();
+    optimizer.optimize(5);
+
+    // Step 6：用卡方检验剔除误差大的边
+    // Check inliers
+    int nBad=0;
+    for(size_t i=0; i<vpEdges12.size();i++)
+    {
+        g2o::EdgeSim3ProjectXYZ* e12 = vpEdges12[i];
+        g2o::EdgeInverseSim3ProjectXYZ* e21 = vpEdges21[i];
+        if(!e12 || !e21)
+            continue;
+
+        if(e12->chi2()>th2 || e21->chi2()>th2)
+        {
+            // 正向或反向投影任意一个超过误差阈值就删掉该边
+            size_t idx = vnIndexEdge[i];
+            vpMatches1[idx]=static_cast<MapPoint*>(NULL);
+            optimizer.removeEdge(e12);
+            optimizer.removeEdge(e21);
+            vpEdges12[i]=static_cast<g2o::EdgeSim3ProjectXYZ*>(NULL);
+            vpEdges21[i]=static_cast<g2o::EdgeInverseSim3ProjectXYZ*>(NULL);
+            // 累计删掉的边 数目
+            nBad++;
+        }
+    }
+
+    // 如果有误差较大的边被剔除那么说明回环质量并不是非常好,还要多迭代几次;反之就少迭代几次
+    int nMoreIterations;
+    if(nBad>0)
+        nMoreIterations=10;
+    else
+        nMoreIterations=5;
+
+    // 如果经过上面的剔除后剩下的匹配关系已经非常少了,那么就放弃优化。内点数直接设置为0
+    if(nCorrespondences-nBad<10)
+        return 0;     
+
+    // Optimize again only with inliers
+    // Step 7：再次g2o优化 剔除后剩下的边
+    optimizer.initializeOptimization();
+    optimizer.optimize(nMoreIterations);
+
+    // 统计第二次优化之后,这些匹配点中是内点的个数
+    int nIn = 0;
+    for(size_t i=0; i<vpEdges12.size();i++)
+    {
+        g2o::EdgeSim3ProjectXYZ* e12 = vpEdges12[i];
+        g2o::EdgeInverseSim3ProjectXYZ* e21 = vpEdges21[i];
+        if(!e12 || !e21)
+            continue;
+
+        if(e12->chi2()>th2 || e21->chi2()>th2)
+        {
+            size_t idx = vnIndexEdge[i];
+            vpMatches1[idx]=static_cast<MapPoint*>(NULL);
+        }
+        else
+            nIn++;
+    }
+
+    // Recover optimized Sim3
+    // Step 8：得到优化后的结果
+    g2o::VertexSim3Expmap* vSim3_recov = static_cast<g2o::VertexSim3Expmap*>(optimizer.vertex(0));
+    g2oS12= vSim3_recov->estimate();
+
+    return nIn;
+}
+
+
+} //namespace ORB_SLAM

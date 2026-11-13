@@ -1,23 +1,15 @@
 # Code availability
 
-## Included code
+The repository includes:
 
-`scripts/reproduce_analysis.py` is a standalone offline reconstruction utility.
-It validates the packaged formal records, recomputes core tables, calculates
-descriptive correlations, and generates white-background figures. It is
-licensed under MIT only as specified in `LICENSE_SCOPE.md`.
+- standalone historical offline analysis;
+- a portable release-integrity validator and execution helper;
+- the audited Paper2/ORB-SLAM2 instrumentation overlay;
+- the exact tracked-file patch against the stated local base identity;
+- common snapshot, g2o and Ceres 2.2.0 replay source.
 
-## Excluded code
-
-The instrumented ORB-SLAM2-derived runtime is not included. No C++, g2o,
-DBoW2, third-party solver source, model source, or Paper1 code is redistributed.
-The MIT grant does not apply to those excluded components.
-
-## Reproduction boundary
-
-The included code reproduces offline analysis from frozen CSV files. It does
-not recreate the CSV files from RGB-D input and must not be described as full
-end-to-end SLAM reproducibility.
-
-Any later runtime-source release requires a separate GPL and third-party notice
-audit and is outside this repository's scope.
+The complete third-party ORB-SLAM2/g2o/DBoW2 base, Ceres installation,
+binaries, ORB vocabulary, model weights and raw snapshots are not included.
+Consequently the packaged analysis is directly reproducible, while end-to-end
+runtime and backend replay require separately obtained licensed dependencies
+and input data. See `INSTALL.md`, `LICENSE_SCOPE.md`, and `docs/RELEASE_SCOPE.md`.

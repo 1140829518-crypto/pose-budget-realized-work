@@ -132,3 +132,34 @@ formal settings and must retain its separate scope.
 
 Files under `generated/` are outputs of `scripts/reproduce_analysis.py` and may
 be regenerated from the packaged input CSVs. They are not additional experiments.
+
+## Independent extension batch
+
+`data/extension60/EFFECTIVE_60_RUN_RESULTS.csv` contains 60 successful run rows;
+`EFFECTIVE_60_INVOCATION_RECORDS.csv` contains 9,480 nested invocation rows.
+The other files provide scene--budget summaries, adjacent-budget `E_W`, state
+labels, threshold sensitivity, and run-level Pareto flags. `run_directory` is a
+publication-safe internal identifier, not a downloadable raw-run path.
+
+## Batch-separated 120-run summaries
+
+Files under `data/cross_batch/` label every row as either
+`historical_frozen60` or `independent_extension60`. They support comparison
+without treating the two acquisition batches as a homogeneous sample.
+
+## Independent backend validation
+
+- `FINAL_RUN_ORDER.csv`: frozen 50-record order and input hashes; its `status`
+  column records the pre-execution freeze state, while completion is established
+  by `FORMAL_RUN_RESULTS.csv` and `FORMAL_FAILURES.csv`;
+- `FORMAL_RUN_RESULTS.csv`: one backend--budget--diagnostic-run record per row;
+- `FORMAL_CALL_RESULTS.csv`: 7,590 nested call rows;
+- `FORMAL_ROUND_RESULTS.csv`: 30,360 nested round rows;
+- `FORMAL_ELASTICITY.csv`: adjacent-budget `E_W` by backend and run;
+- `FORMAL_RUN_AGGREGATION.csv`: run-level descriptive summaries;
+- `FORMAL_PAIRED_BACKEND_DIFFERENCES.csv`: paired run-level differences;
+- `FORMAL_PAIRWISE_CALL_DIFFERENCES.csv`: 3,795 nested paired calls;
+- `FORMAL_FAILURES.csv`: retained failures (header only in this batch).
+
+The five `independent_run_id` values are the statistical units. A run record is
+a repeated-measures condition, not a new independent run.

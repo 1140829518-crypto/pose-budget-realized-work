@@ -1,0 +1,13 @@
+{
+  "slam_binary": "/path/to/rgbd_tum",
+  "vocabulary": "/path/to/ORBvoc.txt",
+  "settings": "/path/to/settings.yaml",
+  "dataset": "/path/to/rgbd_sequence",
+  "association": "/path/to/associations.txt",
+  "output_root": "/path/to/output/pose_budget_sweep",
+  "scene_id": "replace_with_scene_id",
+  "budgets": [1, 3, 4, 5, 10],
+  "repeats": 3,
+  "max_frames": 80,
+  "cpu_affinity": "2"
+}

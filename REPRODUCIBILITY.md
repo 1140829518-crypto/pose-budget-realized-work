@@ -42,13 +42,25 @@ The public script rebuilds core summaries and descriptive correlations. It does
 not rerun the 10,000-resample manuscript bootstrap; the audited bootstrap
 output is included as frozen data in `STATISTICAL_ROBUSTNESS.csv`.
 
-### Level 3: end-to-end SLAM replay — not provided
+### Level 3: instrumented runtime reconstruction — source published, inputs external
 
-The package does not contain the instrumented ORB-SLAM2-derived runtime, dataset
-images, ground truth, association files, ORB vocabulary, semantic inputs,
-compiled libraries, or full raw run directories. It therefore cannot recreate
-the CSV files from sensor data. Such reproduction requires a separately licensed
-runtime release and source datasets obtained from their maintainers.
+The package contains the audited instrumentation overlay and exact tracked
+patch. It does not contain the complete base tree, dataset images, ground
+truth, ORB vocabulary, model weights, binaries, raw run directories, or raw
+backend snapshots. Rebuilding and rerunning therefore requires the compatible
+licensed base and source datasets obtained from their maintainers.
+
+### Level 4: g2o/Ceres snapshot replay — implementation and results published
+
+`validation/backend_replay/source/` contains the common snapshot reader,
+four-round chained replay and consistency tools. `data/backend_validation/`
+contains 50 frozen run-level records and nested call/round results. Raw snapshot
+JSON is not redistributed. The formal unit is five diagnostic runs; calls and
+rounds are nested observations.
+
+```bash
+python3 scripts/analysis/verify_release.py
+```
 
 ## Generated outputs
 
@@ -73,6 +85,8 @@ then rerun the script to compare hashes and values.
 4. Do not interpret recorded offline processing intervals as deadline compliance
    or live real-time capability.
 5. Do not interpret non-monotonic ATE/RPE values as a new optimization method.
+6. Do not pool the historical 60, extension 60, or backend replay records.
+7. Do not describe `CHAINED_OFFLINE_REPLAY_V1` as an online SLAM replication.
 
 ## Integrity
 

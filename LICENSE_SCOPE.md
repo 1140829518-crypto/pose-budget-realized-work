@@ -1,95 +1,49 @@
-# License scope
+# Licence scope
 
-Reviewed: 2026-10-21
+Reviewed: 2026-11-13
 
-This repository deliberately uses file-scoped licensing. No license here
-relicenses ORB-SLAM2, g2o, DBoW2, NumPy, Matplotlib, the TUM RGB-D benchmark,
-or any other third-party material.
+This repository uses file-scoped licensing. Nothing here relicenses datasets,
+dependencies, or source obtained elsewhere.
 
-## MIT License — original analysis code
+## GPL-3.0-or-later and preserved upstream notices
 
-The following file was written specifically for this Paper2 release and was
-reviewed as standalone offline analysis code. It does not contain copied
-ORB-SLAM2, g2o, DBoW2, Paper1, or other third-party source code:
+The Paper2/ORB-SLAM2-derived instrumentation overlay, exact source patch,
+runtime tests, and g2o/Ceres replay implementation are distributed under
+GPL-3.0-or-later subject to preserved third-party notices:
 
-- `scripts/reproduce_analysis.py`
+- `runtime/SOURCE_DIFF.patch`;
+- `runtime/orbslam2_overlay/**`;
+- `validation/backend_replay/source/**`;
+- `validation/backend_replay/README.md`.
 
-That file is licensed under the MIT License in `LICENSES/MIT-CODE.txt`.
-Imported Python packages remain governed by their own licenses.
+Modified g2o-origin files also retain the BSD notice in
+`LICENSES/G2O-BSD.txt`. See
+`LICENSES/ORB_SLAM2-PAPER2-GPL-3.0-or-later-NOTICE.txt`. The repository does
+not claim ownership of upstream code.
 
-## CC BY 4.0 — author-generated derived material
+## MIT — standalone offline release tools
 
-The following files are author-generated documentation, provenance records,
-derived experiment data, or figures and are licensed under Creative Commons
-Attribution 4.0 International as described in
-`LICENSES/CC-BY-4.0-DATA.md`.
+The following original, standalone scripts are licensed under
+`LICENSES/MIT-CODE.txt`:
 
-Documentation and release metadata:
+- `scripts/reproduce_analysis.py`;
+- `scripts/analysis/verify_release.py`;
+- `scripts/run/run_pose_budget_sweep.py`.
 
-- `README.md`
-- `DATA_DICTIONARY.md`
-- `REPRODUCIBILITY.md`
-- `DATA_AVAILABILITY.md`
-- `CODE_AVAILABILITY.md`
-- `LICENSE_REVIEW.md`
-- `RELEASE_AUDIT.md`
-- `UPLOAD_BLOCKERS.md`
-- `PROVENANCE.csv`
-- `CITATION.cff`
-- `requirements.txt`
-- `SOURCE_CANDIDATE_SHA256SUMS`
-- `SHA256SUMS`
+Imported packages retain their own terms.
 
-Frozen and derived formal experiment material:
+## CC BY 4.0 — author-generated data and documentation
 
-- `data/formal/FINAL_RESULTS.csv`
-- `data/formal/INVOCATION_RESULTS.csv`
-- `data/formal/RUNTIME_REPRODUCIBILITY.csv`
-- `data/formal/SCENE_BUDGET_SUMMARY.csv`
-- `data/formal/SCENE_GENERALIZATION.csv`
-- `data/formal/EXPERIMENT_ENVIRONMENT.json`
-- `data/formal/STATISTICAL_ROBUSTNESS.csv`
-- `data/formal/CORE_RESULT_TABLE.csv`
-
-Separate diagnostic material:
-
-- `data/diagnostic/STOP_REASONS.csv`
-- `data/diagnostic/ITERATION_DIAGNOSTICS.csv`
-- `data/diagnostic/ITERATION_CONTRIBUTIONS.csv`
-- `data/diagnostic/PER_ROUND_ACTUAL_ITERATIONS.csv`
-
-Recomputed outputs:
-
-- `generated/accuracy_vs_budget.png`
-- `generated/b5_b10_response.csv`
-- `generated/budget_vs_poseopt_runtime.png`
-- `generated/diagnostic_stop_and_decay.png`
-- `generated/realized_work_vs_runtime.png`
-- `generated/reproduction_summary.json`
-- `generated/runtime_correlations.csv`
-- `generated/scene_budget_recomputed.csv`
-- `generated/work_response.png`
-
-## License and administrative files
-
-The license texts in `LICENSES/` reproduce or reference their respective
-standard terms and are not relicensed by this scope declaration.
-`.gitignore` and `.gitattributes` are administrative repository metadata.
+Author-generated CSV/JSON/PNG evidence under `data/` and `generated/`, public
+configuration examples under `configs/`, and documentation/metadata files at
+the repository root and under `docs/` are licensed under
+`LICENSES/CC-BY-4.0-DATA.md`, except where another notice is embedded.
 
 ## Explicit exclusions
 
-The following are not included and receive no license grant from this
-repository:
-
-- ORB-SLAM2, g2o, DBoW2, or other third-party source code and binaries;
-- original TUM RGB-D images, depth maps, ground truth, and associations;
-- Paper1 code, results, figures, tables, or artifacts;
-- instrumented runtime patches, trajectories, vocabulary files, model weights,
-  raw SLAM logs, and internal machine configuration;
-- credentials, private keys, access tokens, or private filesystem paths.
-
-The packaged CSV and figure files are derived research outputs. They do not
-embed or redistribute the source RGB-D frames. Users requiring original TUM
-data must obtain it from the dataset maintainer under its applicable terms.
+No licence grant is made here for original TUM RGB-D or ICL-NUIM data, ORB
+vocabulary files, model weights, Ceres, complete ORB-SLAM2/g2o/DBoW2 source
+trees, binaries, or any unlisted third-party material. Those items are not
+redistributed.
 
 This scope record is an engineering and provenance statement, not legal advice.

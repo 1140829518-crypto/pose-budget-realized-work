@@ -1,38 +1,20 @@
 # Data availability
 
-## Included
+Included derived evidence comprises:
 
-This release includes author-generated derived tabular records necessary to
-reproduce the paper's main offline summaries and figures:
+- historical frozen 60-run/9,480-invocation records;
+- separate historical diagnostic summaries;
+- independent extension 60-successful-run/9,480-invocation records;
+- explicitly batch-separated 120-run summaries;
+- g2o/Ceres replay results for 50 completed condition records over five
+  independent diagnostic runs, including nested call and round tables.
 
-- formal run-level results;
-- formal invocation-level work and optimizer-core timing;
-- scene--budget summaries and robustness tables;
-- separate diagnostic stop labels and per-iteration measurements;
-- experiment environment metadata without local filesystem paths.
+Original TUM RGB-D and ICL-NUIM sensor frames, ground truth, associations, raw
+run directories, trajectories, replay snapshot JSON, binaries, model weights,
+and private environment logs are not redistributed. Obtain source datasets from
+their maintainers under their applicable terms.
 
-The exact licensed paths are listed in `LICENSE_SCOPE.md` and are available
-under CC BY 4.0.
-
-## Not included
-
-- TUM RGB-D images, depth maps, ground-truth source files, or associations;
-- original run directories, trajectories, raw logs, binaries, or
-  dynamic-library snapshots;
-- YOLO detections, models, or weights;
-- Paper1 datasets or experiment outputs.
-
-Original TUM data must be obtained under the dataset maintainer's terms from:
-
-https://cvg.cit.tum.de/data/datasets/rgbd-dataset
-
-## Provenance boundary
-
-The formal CSV files are byte-identical copies of the frozen Paper2 experiment
-summaries. Diagnostic CSV files are byte-identical copies of the separate
-saturation-diagnostic aggregation. Files containing personal absolute paths or
-internal machine commands were intentionally excluded. `PROVENANCE.csv` records
-the source-relative path and SHA-256 digest of each copied input.
-
-No permanent archive DOI exists at this release. Add one only after the authors
-create and approve an archive record.
+The batches retain separate identities. Diagnostic data must not be pooled with
+formal accuracy results, failed extension attempts are not counted as successful
+runs, and replay calls/rounds are not independent replicates. Public path fields
+were normalised without changing numeric results or cryptographic input hashes.
